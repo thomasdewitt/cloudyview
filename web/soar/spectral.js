@@ -1,10 +1,9 @@
 // Time-of-day lighting: what colour the sun, sky and ambient fill are for a
-// given solar elevation. Port of cloudyview/look.py::_spectral_lighting_colors
-// and its neighbours.
+// given solar elevation. Port of cloudyview/soar/look.py's
+// _spectral_lighting_colors and its neighbours.
 //
-// The desktop build could bake these into a uniform template because its sun
-// never moved between exports. Ours does — the time-of-day panel is a slider —
-// so the whole calculation has to run per frame in JS.
+// The sun moves — the time-of-day panel is a slider — so the whole
+// calculation runs per frame in JS.
 
 "use strict";
 
@@ -136,7 +135,7 @@ export function effectiveLightTransferSplit(strength, sunElevationDeg) {
 
 // Aerosol loading rises faster than linearly with the slider, so haze 1 is a
 // real murk (0.11/km, ~36 km visual range by Koschmieder) rather than a
-// slightly softer default. Twin of look.py's _AERIAL_BETA_HAZE_COEFFICIENT.
+// slightly softer default. Twin of soar/look.py's _AERIAL_BETA_HAZE_COEFFICIENT.
 const AERIAL_BETA_HAZE_COEFFICIENT =
   (AERIAL_BETA_PER_KM - AERIAL_BETA_FLOOR_PER_KM)
   / (HAZE_ANCHOR * Math.sqrt(HAZE_ANCHOR));

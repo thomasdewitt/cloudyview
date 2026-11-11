@@ -4,8 +4,8 @@ The manhole-steam component (city/components/manholesteam.wgsl) chooses its
 sources among the core's manhole sites (city_manhole), and the ground shader
 draws a cover at every present site (city_manhole_cover); a steaming site
 the component gives a stack draws the stack itself (its cell_props). A
-plume with nothing under it is a bug Thomas found on 2026-11-08 ("the one I
-found is just on a random bit of street"). So this runs the shader's own
+plume with nothing under it is a bug (one stood on a random bit of
+street). So this runs the shader's own
 functions, on the GPU, over every site of a stretch of streets of the
 shipped tile, and holds every steaming site to a cover drawn at its centre
 (city_manhole_cover through city_road, the ground's own path, at a
@@ -13,13 +13,13 @@ resolved footprint) and kept dry there by its heat — and no other site to a
 dry lid: the ground and the component ask one rule (city_manhole_steam), so
 a pale dry lid and its plume can never disagree.
 
-The functions are cut out of raymarch.wgsl by name, with everything they
+The functions are cut out of the city module by name, with everything they
 call (found by name, transitively) and every module-scope constant, over
 stub declarations of the globals they read: the uniform block's
 ocean_params (x the block, y the tile, w the top mip) and the city tile
 with its mips and sampler (city_glow_sample's district read).
 
-Skips without a real GPU adapter. Run it through tools/gpulock.
+Skips without a real GPU adapter.
 """
 
 import json

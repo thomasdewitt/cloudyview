@@ -192,7 +192,7 @@ class SceneState:
     """Everything about the field, independent of where the camera is.
 
     `surface` is what the world stands on: "ocean" or "city". The city adds
-    no uniform rows. The block is the same 416 bytes over either surface; the
+    no uniform rows. The block is the same 336 bytes over either surface; the
     city REINTERPRETS a few rows, and the fields keep their ocean names
     because the slots are the ocean's. Under "city":
 

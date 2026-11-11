@@ -36,7 +36,7 @@ export const ice = {
     // while the volume is being read — disableIceMode — is seen below.
     const request = ++this._iceRequest;
     // No scene at all — the gap while a load is in flight. Nothing to say
-    // about ice that does not exist yet; this used to read iceNote off null.
+    // about ice that does not exist yet, and no scene to read iceNote from.
     if (!this.scene) return;
     if (!this.scene.iceAvailable) {
       this.ui.say(this.scene.iceNote, 6);

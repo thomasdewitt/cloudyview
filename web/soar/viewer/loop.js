@@ -200,13 +200,13 @@ export const loop = {
     // The clock runs on the simulation's dt (the camera's clock, so a stall
     // cannot jump the steam either). Where the steam is drawn live
     // (Renderer.liveSteamActive: the city at Medium and up) it runs paused
-    // or parked too (Thomas, 2026-11-08: the steam "should keep going when
-    // the flight is paused"): the live view draws the steam after the
+    // or parked too, so the steam keeps going when the flight is paused: the
+    // live view draws the steam after the
     // accumulation and keeps the clock out of the scene key, so a parked
     // picture converges under steam that moves. At Low and Minimal the steam
     // is marched and the clock is in the key, so it runs only with the
-    // flight or a recording, and a parked picture converges as it always
-    // did. A recording samples the clock with the camera, so a replay's
+    // flight or a recording, and a parked picture converges under still
+    // steam. A recording samples the clock with the camera, so a replay's
     // steam moves as it did.
     const clockRuns = this.renderer.liveSteamActive
       || (!this.paused && (cameraMoved || this.recorder.recording));
@@ -449,8 +449,8 @@ export const loop = {
     //
     // Nothing here is coupled to pause or to the pointer lock: the test is
     // purely "is the picture finished", and what ends it is purely the input
-    // enumerated in _wake. Bugs 1-2 in docs/soar-bugs.md live in the pause
-    // state machine and this must not become a third.
+    // enumerated in _wake. The pause state machine is where input bugs live,
+    // and this must not become part of it.
     //
     // The bird is the usual reason a converged view keeps a loop at all — it
     // flies whether or not the camera does — but a blit is not a march, so

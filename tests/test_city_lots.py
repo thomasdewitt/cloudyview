@@ -2,7 +2,7 @@
 
 tools/city_lots.py decides offline which blocks form one lot, what each
 lot is used for and which grid edges carry a street, and packs the answers
-into the city tile's b and a channels at mip 0. raymarch.wgsl city_cell
+into the city tile's b and a channels at mip 0. The shader's city_cell
 decodes them. These tests pin three things: that the shipped tile IS the
 bake of its own r and g (nobody hand-edited or half-regenerated it), that
 the bake keeps its promises (every member of a lot agrees on the lot, no lot

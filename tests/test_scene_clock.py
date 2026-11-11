@@ -49,7 +49,7 @@ def test_a_missing_or_zero_clock_is_refused():
 
 
 def test_the_city_clock_is_the_steams():
-    """The city's clock wraps at its tile's period, where city-street's
+    """The city's clock wraps at its tile's period, where the manhole
     steam repeats exactly (tools/export_web_assets.py CITY_CLOCK_PERIOD_S):
     the steam states the same period, and its noise lattice — rising
     (lattice scale) x RISE_RATE cells a second, wrapping at ZWRAP cells —

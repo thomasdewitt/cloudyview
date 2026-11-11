@@ -1,6 +1,7 @@
 """The Python host and the browser must fill the same uniform block.
 
-There is one renderer core — web/soar/raymarch.wgsl — driven by two hosts:
+There is one renderer core — the shader under cloudyview/soar/shader/ —
+driven by two hosts:
 JavaScript in the tab and Python via wgpu. The shader is shared by
 construction, so it cannot drift. The uniform block can, and that is the
 whole surface where a Python render could silently stop matching soar.
@@ -80,8 +81,8 @@ CASES = [
                     "ocean_fif_dx": 90.0, "ocean_tile_extent": 92160.0,
                     "ocean_max_lod": 10, "periodic": False},
      {"sun_azimuth": 310.0, "sun_elevation": 22.0}),
-    # Row 24, the surface offset the water samples and the city frame are
-    # derived from (2026-09-01). Both hosts must fold it into
+    # u.surface_offset, the surface offset the water samples and the city
+    # frame are derived from. Both hosts must fold it into
     # [0, tile extent) with the SAME arithmetic: an explicit override whose
     # negative component wraps, and one far beyond the tile (a flight's
     # offset shifts by cloud periods, which dwarf the day tile) — on a day
@@ -97,7 +98,7 @@ CASES = [
     ("ocean_no_clock_later",
      {"surface_offset_m": [-18630.2, 136143.7], "clock_period_s": None},
      {"scene_time": 987654.321}),
-    # The city's clock runs too (2026-09-24: its steam reads it), wrapped
+    # The city's clock runs too (its steam reads it), wrapped
     # at the city tile's own period, the same way in both.
     ("city_clock_running",
      {"surface": "city", "city_tile_offset_m": [75330.0, -17010.0],

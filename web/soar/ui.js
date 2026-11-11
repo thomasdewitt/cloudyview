@@ -1,9 +1,9 @@
 // The overlay: menu, panels, readouts, prompts.
 //
 // Menus are click-only. Keys are reserved for things you do WHILE flying —
-// where reaching for a menu would mean losing the shot — so the desktop's key
-// state machine does not come across. Esc, Tab, F, F3, B, G, M, R and P are
-// the whole keyboard surface once you are in the air.
+// where reaching for a menu would mean losing the shot. Esc, Tab, F, F3 (or
+// `), B, I, K, M, R and P (or F12) are the whole keyboard surface once you
+// are in the air.
 
 "use strict";
 
@@ -24,8 +24,8 @@ export const MODE_KEY = "soar.mode";
  * The tutorial and the way back to the start page are on every list: neither
  * is a research control, and a mode with no exit is not a mode.
  *
- * The labels carry the word "mode" — the toggle stands where "Paused" used to
- * and has to say what it switches, not just which of three.
+ * The labels carry the word "mode" — the toggle stands on the menu's title
+ * line and has to say what it switches, not just which of three.
  */
 export const MODES = {
   basic: {
@@ -112,7 +112,7 @@ function sliderRow(label, { min, max, step, value, format, onInput }) {
 
 // Panels whose controls change (or capture) the picture dock to the bottom
 // edge instead of the centre — anything where one would want to SEE the view
-// while the panel is up (Thomas, 2026-08-11). Navigation and questions stay
+// while the panel is up. Navigation and questions stay
 // centred.
 const DOCKED_PANELS = new Set(["quality", "sun", "terminal", "capture", "track"]);
 
@@ -173,7 +173,8 @@ function item(label, note, onClick, { disabled = false } = {}) {
 }
 
 export class UI {
-  /** `app` is the viewer; see viewer.js for the surface used here. */
+  /** `app` is the viewer; see viewer.js and viewer/ for the surface used
+   *  here. */
   constructor(root, app) {
     this.root = root;
     this.app = app;
@@ -252,10 +253,10 @@ export class UI {
 
     this.toolbar = el("div", "panel");
     this.toolbar.id = "toolbar";
-    // No "menu" chip here. It only ever existed as a rescue for the state
-    // "mouse free, menu closed, Escape swallowed" (bug 2); Escape now pauses
-    // reliably from the keydown route, so the net came down rather than
-    // staying up to hide the next regression.
+    // No "menu" chip here. Its only use would be as a rescue for the state
+    // "mouse free, menu closed, Escape swallowed"; Escape pauses reliably
+    // from the keydown route, and a net left up would hide the next
+    // regression.
     this.fsButton = el("button", "chip", "⛶ fullscreen");
     this.fsButton.addEventListener("click", () => this.app.toggleFullscreen());
     this.toolbar.append(this.fsButton);
@@ -305,10 +306,10 @@ export class UI {
   /**
    * Off, or the whole instrument. Two states, not three.
    *
-   * The middle rung used to be a one-line "42 fps · 180 m/s", which is two
-   * numbers that now have homes of their own: the speed chip is always in the
-   * corner, and fps is a diagnostic. A diagnostic that is half on is a third
-   * state to reason about and answers no question the full one does not.
+   * A one-line middle rung, "42 fps · 180 m/s", would be two numbers that
+   * have homes of their own: the speed chip is always in the corner, and fps
+   * is a diagnostic. A diagnostic that is half on is a third state to reason
+   * about and answers no question the full one does not.
    */
   cycleStats() {
     this.statsMode = this.statsMode === "full" ? "off" : "full";
@@ -405,9 +406,9 @@ export class UI {
     this.menu.hidden = true;
     this.panel = null;
     this._syncQualityPreview();
-    // Every open/close keeps the chrome classes honest. saveScreenshot used
-    // to close the menu with no _syncChrome, leaving `menu-open` describing
-    // a state the app was no longer in (bug 2's sibling).
+    // Every open/close keeps the chrome classes honest: a close with no
+    // _syncChrome would leave `menu-open` describing a state the app is no
+    // longer in.
     this.app._syncChrome?.();
   }
 
@@ -452,9 +453,6 @@ export class UI {
     }
   }
 
-  /** A panel head. `kicker` may be null where it would only restate the
-   *  title — two lines saying one thing is worse than one (Thomas,
-   *  2026-08-14). */
   /**
    * Hold the flight picture still while — and only while — the Quality panel
    * is up, so its controls have something visible to act on. Driven from the
@@ -466,6 +464,8 @@ export class UI {
       this.panel === "quality" ? this._qualityPreview : "still");
   }
 
+  /** A panel head. `kicker` may be null where it would only restate the
+   *  title — two lines saying one thing is worse than one. */
   _header(kicker, title) {
     const h = el("div", "panel-head");
     if (kicker) h.append(el("h3", null, kicker));
@@ -478,11 +478,12 @@ export class UI {
   }
 
   /**
-   * The mode toggle, which stands where the word "Paused" used to.
+   * The mode toggle, on the menu's title line.
    *
-   * "Paused" was the state and the menu around it already said so. What the
-   * menu cannot say for itself is which of several menus it is, and that is
-   * the one thing worth a control on the title line.
+   * A word "Paused" there would only state the state, and the menu around
+   * it already says so. What the menu cannot say for itself is which of
+   * several menus it is, and that is the one thing worth a control on the
+   * title line.
    */
   _modeToggle() {
     // A landing-only mode is on the toggle only when it is the one you are
@@ -515,7 +516,7 @@ export class UI {
    * differ by a list in MODES rather than by conditionals scattered through
    * here. Left column is how the picture looks; right column is the field you
    * are flying and what you take away from it. Leaving is neither, so it sits
-   * alone at the foot (Thomas, 2026-08-14).
+   * alone at the foot.
    */
   _panel_main() {
     const app = this.app;
@@ -558,8 +559,7 @@ export class UI {
         : `${app.sunZenith.toFixed(0)}° zenith, sun to the ${app.sunCompass}`}`,
       () => this.open("sun")));
     // The tier's name and nothing else. The render scale, and whether the
-    // machine chose the tier, are the quality panel's business (Thomas,
-    // 2026-08-14).
+    // machine chose the tier, are the quality panel's business.
     add(appearance, "quality", item(
       "Quality…",
       K.QUALITY_PRESETS[app.renderer.qualityTier].label.split(" —")[0],
@@ -599,12 +599,12 @@ export class UI {
              () => { app.togglePeriodic(); this.open("main"); }));
     // No minimap, flyer or fullscreen row. Each was a row whose whole content
     // was a state and the key that cycles it, and the Controls panel is where
-    // the keys are — so they are stated there, once, with their availability
-    // (Thomas, 2026-08-22). Nothing is lost but three rows off the menu: the
+    // the keys are — so they are stated there, once, with their availability.
+    // Nothing is lost but three rows off the menu: the
     // keys work from the flight, which is where you are when you want them.
 
     // What is loaded belongs on the control that would replace it, not in a
-    // block of its own at the foot (Thomas, 2026-08-14).
+    // block of its own at the foot.
     const open = item("Open a NetCDF file…", `Current: ${app.sourceLabel}`,
                       () => app.pickFile());
     if (app.scene.nested) {
@@ -665,9 +665,8 @@ export class UI {
     m.append(this._header("performance", "Quality"));
 
     // The tiers and the preview share one line. This panel is docked at the
-    // bottom to be looked PAST, and every row it does not spend is sky
-    // (Thomas, 2026-08-14) — which is also why the prose that used to explain
-    // each of these is gone.
+    // bottom to be looked PAST, and every row it does not spend is sky —
+    // which is also why there is no prose explaining each of these.
     const head = el("div", "seg-row");
     // Everything here goes through the viewer rather than straight at the
     // renderer, because every one of these changes the picture and the frame
@@ -777,8 +776,8 @@ export class UI {
       format: (v) => v.toFixed(2),
       onInput: (v) => { app.setMotionSmoothing(v); noteCustom(); },
     }));
-    // Exposure is a slider full stop, with auto as its mode (Thomas,
-    // 2026-08-14) — so auto is a word inside the label rather than a row of
+    // Exposure is a slider full stop, with auto as its mode — so auto is a
+    // word inside the label rather than a row of
     // its own. Dragging the slider is choosing manual: setExposure turns
     // auto off, and the toggle has to be repainted where it stands, since
     // nothing rebuilds the panel under a hand that is still on the slider.
@@ -939,9 +938,9 @@ export class UI {
     // key that does the same thing. F3 and ` are one binding, not two modes.
     //
     // The minimap and flyer keys carry their state and, when the field cannot
-    // have one, the reason — this is the only place either is said now that
-    // the menu rows are gone, and a field that cannot carry a flyer still owes
-    // an explanation of why.
+    // have one, the reason — this is the only place either is said, since
+    // the menu has no rows for them, and a field that cannot carry a flyer
+    // still owes an explanation of why.
     section("While flying", [
       ["Esc", "menu"],
       ["F", "fullscreen"],
@@ -1037,7 +1036,7 @@ export class UI {
 
   /** What R offers when you stop recording — including every video option.
    *  Video settings live HERE, not in the capture panel: they only mean
-   *  anything once a track exists (Thomas, 2026-08-11). */
+   *  anything once a track exists. */
   _panel_track({ samples, knocks }) {
     const app = this.app;
     const m = this.menu;
@@ -1311,7 +1310,7 @@ export class UI {
   /**
    * Which timestep, when the file holds more than one.
    *
-   * A multi-step file used to be refused outright. It is a question with an
+   * A multi-step file is not refused. It is a question with an
    * obvious answer shape — the steps are right there, and the time
    * coordinate labels them — so it is asked rather than sent back.
    */

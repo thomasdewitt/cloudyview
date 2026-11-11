@@ -285,8 +285,8 @@ def main(
         else:
             output_dir = Path(".")
 
-        # Informational lines the optical-depth library used to print
-        # directly (it logs now; the CLI keeps its output).
+        # Informational lines for the CLI: the optical-depth library logs
+        # rather than prints.
         if field.iwc is None:
             print("  No ice water content detected; optical depth uses liquid water only.")
         print("  No snow water content detected; optical depth excludes snow.")

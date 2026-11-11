@@ -2,10 +2,9 @@
 // glimpse albedo, or, over a night city, the city itself (see "the city map"
 // below).
 //
-// Port of cloudyview/soar/hud.py. The shader (hud.wgsl) is copied verbatim
-// from the desktop, so everything here is host-side: colorizing the albedo
-// into a resident texture once, and packing six vec4s of layout and overlay
-// geometry per frame.
+// The drawing is the shader's (hud.wgsl); everything here is host-side:
+// colorizing the albedo into a resident texture once, and packing six vec4s
+// of layout and overlay geometry per frame.
 //
 //     const map = new Minimap(device, { albedo, shape: [ny, nx] });
 //     // …or, over a night city, the city itself:
@@ -40,11 +39,11 @@ export function azimuthMetToInternalDeg(azimuthDeg) {
 }
 
 /**
- * RGBA8 over MAP_CLOUD_RAMP — the ramp basic_render uses for glimpse output.
+ * RGBA8 over MAP_CLOUD_RAMP — the ramp glimpse uses for its output.
  *
  * Piecewise-linear between the ramp's stops, which is what matplotlib's
  * LinearSegmentedColormap does with the same list, so the two agree to a
- * rounding step. It used to be a single lerp from one blue to white; the
+ * rounding step. Not a single lerp from one blue to white: the
  * intermediate stops are the whole reason the field reads as cloud over
  * water, so they cannot be dropped for a cheaper interpolation here.
  */
@@ -95,7 +94,8 @@ export function sampleCloudRamp(t) {
 // specialization samples — so a bright patch on the map is a tower district
 // on screen, and not an illustration of one.
 //
-// These six are raymarch.wgsl's, restated because a shader constant cannot
+// These six are the shader's (city/layout.wgsl), restated because a shader
+// constant cannot
 // be imported and this arithmetic runs on the CPU.
 // tests/test_city_frame_parity.py fails if any of them drifts.
 const CITY_MAP_EMPTY_RANK = 0.22;
@@ -104,7 +104,7 @@ const CITY_MAP_SPRAWL_MIN_FRAC = 0.15;
 const CITY_MAP_H_BASE = 14.0;
 const CITY_MAP_H_SCALE = 390.0;
 const CITY_MAP_H_EXP = 1.2;
-// The lot and street words (cloudyview/city_lots.py) and what the shader
+// The lot and street words (tools/city_lots.py) and what the shader
 // raises on each land use: an urban block shows its LOT OWNER's height — a
 // supertall's whole lot is the tower, not its members' own cascade values —
 // a warehouse its mean roof (city_cell's warehouse law, 9-14.5 m in half
@@ -205,7 +205,7 @@ export function colorizeCityHeights(heights) {
  *
  * This is the whole reason the city map places the marker correctly — the
  * map image is one tile, so the marker's position on it is the camera's
- * position in the tile, which is scene.cityPosition (raymarch.wgsl's
+ * position in the tile, which is scene.cityPosition (the shader's
  * world->tile map, see scene.js cityFramePosition). z is passed through
  * unused: nothing on a top-down map depends on it.
  */
@@ -226,7 +226,7 @@ function unitXY(direction, fallbackRad) {
 /**
  * Where the minimap sits, in screen pixels: `(x, y, w, h)`, top-right.
  *
- * Exported for the same reason the desktop exposes it — it is pure arithmetic
+ * Exported because it is pure arithmetic
  * over the window size and the map's aspect, and it is the piece a test can
  * check without a GPU.
  */
@@ -608,7 +608,7 @@ export class Minimap {
 
     const minSide = Math.min(rect[2], rect[3]);
     // Deliberately understated: the marker is a reference, not a cursor.
-    // Halved on 2026-08-14 (both the dot and the rays), which is as small as
+    // The dot and the rays are as small as
     // the antialiasing lets them go and still be found: stroke_coverage fades
     // over one pixel past the half-width, so a 0.5 px half-width still paints
     // a ~2 px line. Going smaller stops shrinking the mark and just makes it

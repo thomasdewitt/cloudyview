@@ -1,9 +1,7 @@
 // The bird: a common swift, the organic one of soar's two flying subjects.
 //
-// The flight behaviour began as a port of the desktop's bird.py; the geometry
-// and shading did not. `birdmesh.js` and `bird.wgsl` rebuilt the animal from
-// anatomy and are native to this build — unlike raymarch.wgsl, which crossed
-// over verbatim.
+// The geometry and shading are `birdmesh.js` and `bird.wgsl`, built from
+// the animal's anatomy.
 //
 // A common swift at its real size — procedural mesh, no assets — that flies a
 // few metres ahead of and below the camera. It flaps (faster when slow,
@@ -51,9 +49,9 @@ const FLAP_HZ_SLOW = 4.2;     // wingbeat when hovering / slow
 const FLAP_HZ_FAST = 2.2;     // wingbeat just below the glide threshold
 const GLIDE_LO = 70.0;        // m/s: flap starts fading into a glide
 const GLIDE_HI = 110.0;       // m/s: fully tucked into the glide
-// Both bobs were cut to a third on 2026-08-21. They are at their largest
+// Both bobs are small. They are at their largest
 // exactly when the camera is parked — a hovering swift flaps hardest and at
-// full amplitude — and a third of a metre of travel against a still frame read
+// full amplitude — and a third of a metre of travel against a still frame reads
 // as the bird being jostled rather than holding station.
 const BOB_AMPLITUDE = 0.033;  // m, body bob coupled to the wingbeat
 const IDLE_BOB = 0.017;       // m, slow ambient bob so a parked bird still breathes

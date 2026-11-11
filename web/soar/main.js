@@ -198,12 +198,10 @@ async function fetchIndex(root) {
 /**
  * The demo set, read once and shared.
  *
- * There is one root now, so there is nothing to choose between and no probe:
- * a failure here is a real failure and the caller says so on the page. This
- * used to pick between a local bake and a hosted copy, which meant a HEAD
- * whose 200 proved nothing — plenty of hosts answer 200 with an HTML error
- * page for any path they do not recognise. Folding the demos into the app
- * deleted the question rather than answering it better.
+ * There is one root, so there is nothing to choose between and no probe:
+ * a failure here is a real failure and the caller says so on the page. (A
+ * probe would be a HEAD whose 200 proves nothing — plenty of hosts answer
+ * 200 with an HTML error page for any path they do not recognise.)
  */
 let demoIndex = null;
 function resolveDemos() {
@@ -222,10 +220,9 @@ async function endSession() {
 /**
  * Open a field in a viewer of its own.
  *
- * Serialized against itself. Double-clicking Demo used to start two of these
- * — the network probe for the demo base is awaited before anything is hidden,
- * so both got that far — and each acquired its own GPUDevice and configured
- * the same canvas with it. One canvas cannot belong to two devices, and the
+ * Serialized against itself. Unserialized, double-clicking Demo would start
+ * two of these, and each would acquire its own GPUDevice and configure the
+ * same canvas with it. One canvas cannot belong to two devices, and the
  * loser's device-lost watcher would then stop the winner's viewer.
  */
 let entering = null;
@@ -338,9 +335,9 @@ let previewHold = null;
 /** Cross-fade the backdrop to a demo's still, decoding before it is shown. */
 async function showReel(demo, root) {
   if (!demo?.still || reelShown === demo.id) return;
-  // Claim the reel before the first await. Two calls in flight used to pick
-  // the same buffer and the loser hid the element the winner had just shown,
-  // leaving the backdrop black (docs/soar-bugs.md entry 8). `reelShown` set
+  // Claim the reel before the first await. Two calls in flight would
+  // otherwise pick the same buffer and the loser hide the element the winner
+  // had just shown, leaving the backdrop black. `reelShown` set
   // here dedupes repeat hovers on one card; the generation token below drops
   // every call but the newest — the last hover is the only one whose result
   // anyone wants.
@@ -435,9 +432,9 @@ function demoCard(demo, root, numbers) {
   // and the block is not built at all — an empty expansion that opens onto
   // nothing is worse than a row that simply does not open.
   //
-  // This used to be `button.title`, i.e. the browser's own tooltip: a pale
-  // box in the OS's font that lands wherever the pointer is, after whatever
-  // delay the OS feels like, on top of the still the hover exists to reveal.
+  // Not `button.title`, i.e. the browser's own tooltip: a pale box in the
+  // OS's font that lands wherever the pointer is, after whatever delay the
+  // OS feels like, on top of the still the hover exists to reveal.
   const more = [
     demo.warning ? `<span class="warn"></span>` : "",
     demo.description ? `<span class="note"></span>` : "",
@@ -738,7 +735,7 @@ setTimeout(() => document.body.classList.remove("intro"), 1350);
 // of the fields: a pair IS one case at its two bakes, and the rail shows the
 // same two rows in research mode.
 //
-// Cyberpunk flies its own pair (Thomas, 2026-08-22). The daylight pair is the
+// Cyberpunk flies its own pair. The daylight pair is the
 // 51.2 km Utah convection domain, which under a city is 51 km of streets to
 // cross at 20 m/s; marine congestus is a fifth of that box and its cloud base
 // sits where a skyline can reach it. Two ids, not two bakes: the same volumes the

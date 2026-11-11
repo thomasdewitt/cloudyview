@@ -11,8 +11,7 @@ multi-group file therefore died with "can't access property setHoldMode,
 this.renderer is null", which the app reported as "Could not open this
 field" — a nesting fix from the same morning looked like it had broken file
 loading, when what had broken was the panel machinery underneath it. Demos
-never showed it: a demo asks no questions, so no panel goes up mid-load
-(Thomas, 2026-08-14).
+never showed it: a demo asks no questions, so no panel goes up mid-load.
 
 The fix is not a skipped call. The mode is remembered on the viewer and
 applied to whichever renderer appears, so it survives the gap rather than

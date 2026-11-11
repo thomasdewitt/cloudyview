@@ -1,11 +1,9 @@
 // The night city is solid: flight collision and what a collision does to you.
 //
-// Before this, flying into a building made it vanish. The renderer traces
-// every building from the outside, so a camera inside one sees straight
-// through its walls; nothing stopped the camera getting there. Thomas
-// (2026-09-23): "the buildings currently just disappear when you fly into
-// them, but probably the paper airplane should be rocked, like you loose
-// control for a sec and it falls a bit."
+// The renderer traces every building from the outside, so a camera inside
+// one sees straight through its walls, and flying into a building would make
+// it vanish. A crash should instead rock the flyer: you lose control for a
+// moment and fall a little.
 //
 // So this module does two things.
 //
@@ -53,7 +51,7 @@
 // --- The frame ------------------------------------------------------------
 //
 // All of this happens in the CITY frame: x, y are the camera's
-// surfacePosition (the tile frame raymarch.wgsl builds the city in, see
+// surfacePosition (the tile frame the shader builds the city in, see
 // FlightCamera), z is world z. Positions between frames are unwrapped
 // against the previous one, since a frame moves at most a few hundred
 // metres and the tile is 92 km across.
@@ -104,8 +102,7 @@ const IMPACT_FULL_SPEED = 25.0;  // m/s
 // dying away with time constant BOUNCE_TAU and tapered to rest by the
 // episode's end (Episode.displacement) — so it carries you a little under
 // v * RESTITUTION * BOUNCE_TAU metres back in total (2.7 m off a 20 m/s
-// wall; 1.75 m until 2026-11, when Thomas asked for the crash to rock the
-// flight harder). Capped, because at 500 m/s a proportional bounce would
+// wall). Capped, because at 500 m/s a proportional bounce would
 // throw you across a block.
 const RESTITUTION = 0.50;
 const BOUNCE_MAX = 14.0;         // m/s
@@ -125,10 +122,9 @@ const CONTROL_RETURN = 0.45;
 // --- The shake ----------------------------------------------------------------
 // A lurch of a few degrees at two or three hertz, dying away; exactly zero
 // at the episode's end, so the look you had is the look you get back.
-// Landings shake mostly in elevation. (It was a degree or two at four or
-// five hertz until 2026-11 — a buzz, which Thomas found too gentle: "Paper
-// airplane could be a bit more 'rocked' when it hits a building". A slower
-// swing reads as the craft being knocked rather than the camera vibrating.)
+// Landings shake mostly in elevation. A slower, larger swing reads as the
+// craft being knocked; a degree or two at four or five hertz reads as a
+// buzz, the camera vibrating.
 const SHAKE_AZ_DEG = 3.4;
 const SHAKE_EL_DEG = 2.6;
 const SHAKE_AZ_HZ = 3.1;

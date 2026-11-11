@@ -8,7 +8,7 @@ that is merely *present* for every tier is not enough; one written the wrong
 way round is exactly the bug this suite exists to catch, because it is what
 happened to the motion-smoothing slider (it was labelled "Motion smoothing"
 and carried the blend alpha, which runs the other way, so turning it up
-smoothed less — Thomas, 2026-08-14).
+smoothed less).
 
 So: the tables are complete, they are monotone in the direction they claim,
 and the two conversions between smoothing and alpha are exact inverses.
@@ -161,7 +161,7 @@ def test_hold_ladders_climb_from_the_flight_scale_to_the_hold_scale(js):
             js["presets"][tier]["renderScale"], js["holdScale"][tier]), tier
         if len(rungs) > 1:
             assert rungs[-1]["stepFactor"] == js["presets"]["high"]["stepFactor"], tier
-    # The 2026-08-18 hand-tuned defaults (Thomas's panel values).
+    # The hand-tuned defaults (panel values).
     assert [r["scale"] for r in js["built"]["minimal"]] == [0.125, 0.25]
     assert [r["scale"] for r in js["built"]["low"]] == [0.3, 0.5]
     assert [r["scale"] for r in js["built"]["medium"]] == [0.7, 1.0]
@@ -181,7 +181,7 @@ def test_parked_samples_are_capped_and_rise_with_the_tier(js):
     assert parked["high"] == 32
     counts = [parked[t] for t in TIERS]
     assert counts == sorted(counts)
-    # A capture's spp IS the tier's parked count now (Thomas, 2026-08-20),
+    # A capture's spp IS the tier's parked count,
     # and the Advanced override slider must be able to reach every default.
     lo, hi = js["parkedSppLimits"]
     assert lo <= min(counts) and max(counts) <= hi
@@ -209,9 +209,9 @@ def test_cheaper_tiers_may_smooth_deeper(js):
 
 
 def test_high_smoothing_default_stays_inside_its_own_range(js):
-    """High's default was pinned to the pre-slider legacy alpha until
-    2026-08-18, when Thomas retuned every tier by hand — the hand-set values
-    supersede the legacy-look guarantee. What must still hold: the default
+    """High's default is not the pre-slider legacy alpha: every tier is
+    tuned by hand, and the hand-set values supersede the legacy-look
+    guarantee. What must still hold: the default
     maps inside the tier's own alpha range, so the slider can move it both
     ways."""
     high = js["alphaFor"]["high"]

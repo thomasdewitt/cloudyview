@@ -121,8 +121,8 @@ SOAR_RENDER_SETTINGS = {
     "periodic": True,
     "sun_azimuth": 20.0,
     "sun_elevation": 55.0,
-    # Stated, not inherited. witness's default LOD strength moved from 1.0 to
-    # 0.5 on 2026-08-15, and these references were baked at 1.0 — a golden set
+    # Stated, not inherited. witness's default LOD strength is 0.5, and these
+    # references were baked at 1.0 — a golden set
     # whose inputs follow a default silently stops comparing against what it
     # was baked from the moment that default moves. Every other input here is
     # pinned for the same reason; this one only looked like it did not need to

@@ -1,7 +1,7 @@
 """The surface stages are one ordered list per surface, in both hosts.
 
 soar/surfaces.py SURFACE_STAGES and web/soar/constants.js SURFACE_STAGES name the
-raymarch.wgsl entries each traced surface runs before the march; both hosts
+shader entry points each traced surface runs before the march; both hosts
 chain them the same way (surface_stage_plan / surfaceStagePlan) through two
 alternating intermediates. What would go wrong silently is pinned here:
 

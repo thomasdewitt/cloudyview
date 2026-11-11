@@ -6,7 +6,7 @@
 // straight out of the File, so a 40 GB run costs a few tens of megabytes of
 // wasm heap and never leaves the machine.
 //
-// Measured 2026-08-04: a 537 MB chunked netCDF-4, mid-file sub-box read in
+// Measured: a 537 MB chunked netCDF-4, mid-file sub-box read in
 // 4 ms, wasm heap flat at 19 MB across mount, open and slice, in both Firefox
 // and Chrome, with no cross-origin isolation.
 
@@ -819,12 +819,11 @@ async function extinction({ group, units, label, slabBudget, choice = null,
       }, [bytes.buffer]);
     }
   }
-  // Nothing more is read for the domain edges. A doubly periodic field used
-  // to need its four opposite faces uploaded as a ghost ring so that
-  // filtering across the wrap seam saw the far side; the renderer now wraps
-  // in the sampler (raymarch.wgsl sample_level), which is the same fetch
-  // without the four extra hyperslabs, the extra texels, or the two hosts
-  // that had to agree on where the faces went.
+  // Nothing more is read for the domain edges. A doubly periodic field
+  // needs no ghost ring of opposite faces for filtering across the wrap
+  // seam: the renderer wraps in the sampler (volume.wgsl sample_level),
+  // which is the same fetch without four extra hyperslabs, extra texels, or
+  // two hosts that have to agree on where the faces go.
 
   // The minimap image, in glimpse's orientation: (ny, nx) with east to the
   // right and north up. The read already delivered ascending coordinates, so

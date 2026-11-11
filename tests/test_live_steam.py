@@ -1,4 +1,4 @@
-"""The live view's steam (raymarch.wgsl fs_steam_live): the altitude above
+"""The live view's steam (passes.wgsl fs_steam_live): the altitude above
 which none can be in view, and so above which a parked city view sleeps
 (constants.js LIVE_STEAM_CEILING_M), is the steam's top plus its range."""
 
@@ -23,9 +23,8 @@ def test_the_sleep_ceiling_is_the_steam_top_plus_its_range():
 
 
 def test_live_steam_is_drawn_at_medium_and_up_and_only_in_the_city():
-    """Thomas (2026-11-09) on the live steam's ~0.15 ms a frame: "Maybe turn
-    it off for low though?" Medium, High and Max draw it live; Low and
-    Minimal march it, so there it pauses while parked and a parked view
+    """The live steam costs ~0.15 ms a frame. Medium, High and Max draw it
+    live; Low and Minimal march it, so there it pauses while parked and a parked view
     sleeps. Asked of the renderer's own getter (Renderer.liveSteamActive),
     which drawFrame, the viewer's clock and its sleep test all read."""
     import json

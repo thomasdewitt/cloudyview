@@ -291,8 +291,8 @@ export function packUniforms(state, view) {
   // The view-step angle floors at a QUARTER of the render's pixel angle.
   // Not the full pixel: the accumulation is jittered, so a converged image
   // resolves sub-pixel, and a floor at exactly one pixel dissolves the very
-  // detail accumulation would have antialiased (Thomas, in flight: pixel-
-  // matched still read substantially coarser than a pixel). A quarter is
+  // detail accumulation would have antialiased (a pixel-matched floor reads
+  // in flight as substantially coarser than a pixel). A quarter is
   // where the return genuinely ends. An exact 0 stays 0 — the "LOD off,
   // fixed dt" sentinel, unreachable from the slider.
   const pixelTan = 2.0 * tanHalfFov / w;
@@ -320,20 +320,6 @@ export function packUniforms(state, view) {
 }
 
 /**
- * The scene-identity key that decides whether temporal accumulation continues
- * or restarts. Three slots are zeroed out on purpose:
- *
- *   the frame index — it only decorrelates jitter seeds. If it counted,
- *       every frame would read as a scene change and nothing would ever
- *       converge.
- *   the two sampling flags (sub-pixel jitter, jitter scale) — they are
- *       OUTPUTS of the accumulation decision. Including them would make the
- *       key self-referential.
- *
- * The output size is folded in because it changes the image without
- * appearing in the buffer.
- */
-/**
  * The scene clock a surface reads: only where something reads it (a
  * surface with a period: the city's steam), wrapped there in float64,
  * before the narrowing to float32. A surface with no clock packs 0 whatever
@@ -355,6 +341,20 @@ export function sceneClock(sceneTime, clockPeriodS) {
   return clock < 0 ? clock + clockPeriodS : clock;
 }
 
+/**
+ * The scene-identity key that decides whether temporal accumulation continues
+ * or restarts. Three slots are zeroed out on purpose:
+ *
+ *   the frame index — it only decorrelates jitter seeds. If it counted,
+ *       every frame would read as a scene change and nothing would ever
+ *       converge.
+ *   the two sampling flags (sub-pixel jitter, jitter scale) — they are
+ *       OUTPUTS of the accumulation decision. Including them would make the
+ *       key self-referential.
+ *
+ * The output size is folded in because it changes the image without
+ * appearing in the buffer.
+ */
 export function sceneKey(u, outputW, outputH) {
   const copy = new Float32Array(u);
   copy[SLOT.FRAME_INDEX] = 0.0;

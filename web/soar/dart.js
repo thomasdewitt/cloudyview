@@ -44,8 +44,8 @@ const DROP = 0.62;
 const SCALE = 1.0;            // real A4: 0.174 m span, 0.297 m nose to tail
 
 // --- The phugoid ------------------------------------------------------------
-// Cut to a third on 2026-08-21, to match the bird's bob — the porpoise was
-// too much vertical travel against a parked camera. BOTH amplitudes scale,
+// Small, to match the bird's bob — a larger porpoise is too much vertical
+// travel against a parked camera. BOTH amplitudes scale,
 // and they have to: the height IS the pitch swing integrated, so shrinking
 // the travel while keeping the attitude swing would show a dart pitching up
 // and down without going anywhere.

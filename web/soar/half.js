@@ -15,8 +15,8 @@ const _u32 = new Uint32Array(_f32.buffer);
 
 /**
  * IEEE binary32 to binary16, round-to-nearest-EVEN — the mode numpy and the
- * native Float16Array both use. An earlier version rounded half away from
- * zero, which diverged systematically.
+ * native Float16Array both use. Rounding half away from zero would diverge
+ * from them systematically.
  *
  * Only reached on browsers with WebGPU but without Float16Array (Chrome
  * 113-134; Firefox has had it since well before its WebGPU release), so this

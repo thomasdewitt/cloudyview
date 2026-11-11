@@ -36,11 +36,10 @@ def liquid_mass_extinction(re_um: float) -> np.float32:
 def ice_mass_extinction(re_um: float) -> np.float32:
     """Ice mass-extinction coefficient (m^2/g): Ebert & Curry (1992) band 1.
 
-    THE ice coefficient, everywhere: the volume renderers used to convert
-    ice with the geometric-optics sphere at bulk ice density
-    (1.5 / (rho_ice r_e) = 0.0545 m^2/g at 30 um) while the column optical
-    depth used this fit (0.0845 m^2/g at 30 um) — a 1.55x disagreement
-    between glimpse and witness/behold from the same file. Ebert & Curry is
+    THE ice coefficient, everywhere, so glimpse and witness/behold agree on
+    the same file. The geometric-optics sphere at bulk ice density
+    (1.5 / (rho_ice r_e) = 0.0545 m^2/g at 30 um) sits 1.55x below this fit
+    (0.0845 m^2/g at 30 um). Ebert & Curry is
     the one with a physical case for the visible band: it is fitted to real
     (nonspherical) ice cloud optics, whose area per unit mass exceeds the
     mass-equivalent sphere's, which is exactly what the geometric prefactor

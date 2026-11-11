@@ -3,7 +3,7 @@
 // A still is not one frame. The live view converges as you sit still, and a
 // single-frame capture cannot reproduce what you were looking at when you
 // decided to press the button — so a capture re-renders the same camera many
-// times and averages, exactly as the desktop does.
+// times and averages, exactly as witness does.
 
 "use strict";
 
@@ -128,10 +128,10 @@ export async function renderAccumulated(renderer, targetView, size, view,
  * A staging buffer for copying `size` frames to the CPU, made once and
  * reused for every read.
  *
- * A video used to create and destroy one per frame — 33 MB at 4K — and a
- * destroyed buffer's memory goes back to the driver only when the browser
- * gets round to it, so a long video could run the GPU out of memory with
- * nothing actually live (the 2026-08-31 VRAM OOM). One buffer is enough:
+ * A buffer per frame — 33 MB at 4K — would not do: a destroyed buffer's
+ * memory goes back to the driver only when the browser gets round to it,
+ * so a long video could run the GPU out of memory with nothing actually
+ * live. One buffer is enough:
  * every caller awaits `read` before the next frame's march, so no two reads
  * are ever in flight, and `read` refuses rather than queueing if one is.
  */
@@ -211,8 +211,8 @@ function crc32(bytes) {
  *
  * canvas.toBlob gives no way to attach metadata, and the metadata is the
  * point: a screenshot that cannot tell you which field, camera and sun made
- * it is a pretty picture rather than a record. Same key and payload as the
- * desktop's render_metadata, so the two are readable by the same tools.
+ * it is a pretty picture rather than a record. The key is the one
+ * cloudyview/image.py's read_metadata reads.
  */
 export function embedPngText(pngBytes, keyword, text) {
   const encoder = new TextEncoder();

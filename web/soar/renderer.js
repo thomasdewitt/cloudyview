@@ -1,7 +1,7 @@
 // The render loop's GPU half: shader specialization, the three-pass march /
 // accumulate / present chain, and the temporal accumulation state machine.
 //
-// Ported from InteractiveRenderer.encode_pass. The accumulation logic is the
+// The accumulation logic is the
 // part worth reading twice — it is what makes a parked camera converge to a
 // clean still while a moving one stays smooth instead of boiling.
 
@@ -40,11 +40,11 @@ const SAMPLE_FORMAT = "rgba16float";
 // filtering sampler, so no optional feature is involved.
 const ACCUM_FORMAT = "rgba32float";
 // The surface pre-pass target: (radiance, t) of the traced city under each
-// render pixel (raymarch.wgsl fs_surface). t runs to 1e30 on a
+// render pixel (passes.wgsl fs_surface). t runs to 1e30 on a
 // miss, so it is float32; the march only textureLoad()s it.
 const SURFACE_FORMAT = "rgba32float";
 // The veil the first and last surface stages write beside the surface
-// (raymarch.wgsl veil_pack): half-float radiance and opacity and an f32
+// (passes.wgsl veil_pack): half-float radiance and opacity and an f32
 // depth, packed as uints so no float path touches the bits.
 const VEIL_FORMAT = "rgba32uint";
 
@@ -79,7 +79,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 }
 `;
 
-// Two present paths, matching the engine: an exact texel copy when the render
+// Two present paths: an exact texel copy when the render
 // target is already the output size, and a bilinear upscale when it is not.
 //
 // The upscale is done by hand from four textureLoads rather than by a
@@ -93,7 +93,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 // and the canvas is a plain (non-srgb) unorm8 swapchain, so the hardware
 // quantizes exactly what fs_main/fs_exact return. That makes it the one
 // correct place for the dither — see `DITHER_WGSL`, and see
-// cloudyview/basic_render.py's quantize_uint8 for witness's matching encode.
+// cloudyview/image.py's quantize_uint8 for witness's matching encode.
 // Anything dithered earlier would be averaged back out by accumulation.
 const DITHER_WGSL = `
 // TPDF dither, ~1 LSB, for the float -> unorm8 present.
@@ -206,12 +206,6 @@ fn fs_exact(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 }
 `;
 
-/**
- * Run whatever wants to draw on top of the finished frame — the minimap, the
- * bird. Each is `(encoder, targetView, targetFormat)` and encodes its own
- * load-op-"load" pass; nulls are skipped so a caller can pass a fixed-shape
- * list of things that are individually on or off.
- */
 /** The light cache's texture format: red is the optical depth to the sun,
  *  green the optical depth of the cloud overhead. */
 const LIGHT_CACHE_FORMAT = "rg16float";
@@ -223,6 +217,17 @@ function isPending(pipelineOrPromise) {
   return typeof pipelineOrPromise?.then === "function";
 }
 
+/**
+ * Run whatever wants to draw on top of the finished frame — the minimap, the
+ * bird. Each is `(encoder, targetView, targetFormat)` and encodes its own
+ * load-op-"load" pass; nulls are skipped so a caller can pass a fixed-shape
+ * list of things that are individually on or off.
+ *
+ * Overlays are encoded into the SAME command buffer as the frame they sit
+ * on, after the blit that put it on screen. A separate submit would work
+ * but would let the compositor pick up the bare frame in between, which
+ * reads as the minimap flickering.
+ */
 function encodeOverlays(overlays, encoder, targetView, targetFormat) {
   if (!overlays) return;
   for (const overlay of overlays) {
@@ -234,7 +239,7 @@ function encodeOverlays(overlays, encoder, targetView, targetFormat) {
  * Where each of `n` chained surface stages writes and what it reads:
  * [writes, reads] with "final" the surface the march reads and "a"/"b" the
  * two intermediates the chain alternates between (reads null: the first
- * stage). soar_host.surface_stage_plan is the twin.
+ * stage). soar/surfaces.py surface_stage_plan is the twin.
  */
 export function surfaceStagePlan(n) {
   const plan = [];
@@ -321,8 +326,8 @@ export class Renderer {
     });
     // The periodic read of the same volume. Texture axes: u indexes field z
     // (never periodic), v field y, w field x. Repeat on the two lateral axes
-    // is what makes filtering exact across the wrap seam now that no ghost
-    // ring is uploaded — see raymarch.wgsl sample_level.
+    // is what makes filtering exact across the wrap seam with no ghost
+    // ring uploaded — see volume.wgsl sample_level.
     this.volWrapSampler = device.createSampler({
       addressModeU: "clamp-to-edge", addressModeV: "repeat",
       addressModeW: "repeat", magFilter: "linear", minFilter: "linear",
@@ -365,7 +370,7 @@ export class Renderer {
           texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
-        // The veil (raymarch.wgsl veil_buf), read by the march.
+        // The veil (uniforms.wgsl veil_buf), read by the march.
         { binding: 2, visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "uint", viewDimension: "2d" } },
       ],
@@ -444,7 +449,7 @@ export class Renderer {
         binding: 0, visibility: GPUShaderStage.FRAGMENT,
         texture: { sampleType: "unfilterable-float", viewDimension: "2d" },
       }, {
-        // Lens water's state texel (raymarch.wgsl fs_lens_state).
+        // Lens water's state texel (passes.wgsl fs_lens_state).
         binding: 1, visibility: GPUShaderStage.FRAGMENT,
         texture: { sampleType: "unfilterable-float", viewDimension: "2d" },
       }],
@@ -595,7 +600,6 @@ export class Renderer {
     });
   }
 
-  /** Ice mode actually reaches the shader only with a real ice texture. */
   /** Whether this scene and tier draw the city's steam live (after the
    *  accumulation, at the live clock): a city, at a K.LIVE_STEAM_TIERS
    *  tier. Elsewhere the steam is marched, and its clock must stop while
@@ -605,6 +609,7 @@ export class Renderer {
       && K.LIVE_STEAM_TIERS.includes(this.qualityTier);
   }
 
+  /** Ice mode actually reaches the shader only with a real ice texture. */
   get iceModeActive() {
     return Boolean(this.iceMode && this.scene.iceView);
   }
@@ -821,9 +826,8 @@ export class Renderer {
   get parkedAccumFrames() {
     // In live hold mode the point is to LOOK like flight, and flight is
     // sppPerFrame samples, not a converged average — accumulating further
-    // was exactly the "show Live still goes to parked" bug (Thomas,
-    // 2026-08-20): the resolution dropped but the picture then settled into
-    // a clean still anyway. Converge at the flight sample count instead; the
+    // would drop the resolution but then settle into a clean still anyway,
+    // which is not what Live shows. Converge at the flight sample count; the
     // loop still sleeps, holding a frame that looks like the one you fly on.
     if (this._holdMode === "live") return this.sppPerFrame;
     return this.parkedSppOverride
@@ -873,7 +877,7 @@ export class Renderer {
     this.prefetchPipelines();
   }
 
-  // The view march's step and the light march's are separate numbers now; see
+  // The view march's step and the light march's are separate numbers; see
   // QUALITY_PRESETS for the measurements that separated them. They are equal
   // at High, and at every tier's top hold rung, which is High's sampling — so
   // a converged still is stepped identically whatever tier flew there.
@@ -932,7 +936,7 @@ export class Renderer {
 
   /**
    * The surface stages this scene runs, in order (SURFACE_STAGES), as
-   * raymarch.wgsl entries; none over the sea.
+   * shader entry points; none over the sea.
    */
   _stageEntries() {
     if (!this._hasSurfacePass()) return [];
@@ -967,16 +971,16 @@ export class Renderer {
   }
 
   /**
-   * A raymarch.wgsl render pipeline — entry point `entryPoint` into
+   * A render pipeline of the shader — entry point `entryPoint` into
    * `targetFormat`, for the specialization `spec` — as the pipeline itself
    * once it is built, or a promise of it while it is compiling (isPending
-   * tells which). Every raymarch.wgsl pipeline that can be compiled while
+   * tells which). Every shader pipeline that can be compiled while
    * flying goes through here, so they share one cache, one key and one
    * failure rule.
    *
    * Compiled with createRenderPipelineAsync, and asked for ahead of need
    * (prefetchPipelines), because the lighting method is a specialization: a
-   * tier switch, a bake finishing, or a sky-probe toggle can each need a
+   * tier switch, a bake finishing, or a light-cache toggle can each need a
    * shader this session has not compiled yet, and a synchronous compile of
    * fs_main is a visible stall — long ones on Metal. The live loop never
    * waits on one (see drawFrame's waitForPipeline).
@@ -1116,12 +1120,12 @@ export class Renderer {
    * The render targets for one march size, POOLED per size rather than
    * destroyed and reallocated on every change.
    *
-   * The hold ladder made target-size changes routine — every rung climb is
-   * one — where they used to be a rare resize. The old destroy-and-drain
-   * path cost a full `onSubmittedWorkDone()` wait per change, which on
+   * The hold ladder makes target-size changes routine — every rung climb is
+   * one. Destroying and draining per change would cost a full
+   * `onSubmittedWorkDone()` wait each time, which on
    * Firefox is a ~100 ms poll rather than a fence (see the probe-clock
-   * notes in constants.js), so a single hold's climb stalled for most of a
-   * second. Worse than slow: Firefox's WebGPU runs in its MAIN process on
+   * notes in constants.js), so a single hold's climb would stall for most of
+   * a second. Worse than slow: Firefox's WebGPU runs in its MAIN process on
    * this stack, and its queue lifetime tracking is assert-happy — "Queue[Id]
    * is no longer alive" takes down the whole browser (docs/soar-bugs.md 14).
    * Every drain-and-destroy is a spin of that wheel. A pool spins it only on
@@ -1129,7 +1133,7 @@ export class Renderer {
    *
    * Cost: the ladder's sizes sum to ~1.33x of the full-size targets alone
    * (1 + 1/4 + 1/16 + ...), so the pool's ceiling is about a third more
-   * memory than the old worst case, held instead of churned.
+   * memory than one size's targets, held instead of churned.
    */
   async _targetsFor(w, h) {
     if (this._targets && this._targets.w === w && this._targets.h === h) {
@@ -1187,7 +1191,7 @@ export class Renderer {
     // It still exists (pooled, not destroyed), but presentLast sizes its
     // blit off _targets, so re-presenting it would upscale with the wrong
     // dimensions. Null it: the first frame at the new size is unjittered and
-    // clean, exactly as the old destroy path behaved.
+    // clean.
     this._lastPresented = null;
     this._resetAccumulation();
     return this._targets;
@@ -1301,12 +1305,12 @@ export class Renderer {
     // `lens`: null draws a dry lens (captures, stills, the switch off);
     // { dt } steps lens water's state by dt seconds before the present draws
     // it — the live view's wall-clock frame time, a video's resampled frame
-    // interval (see raymarch.wgsl fs_lens_state).
+    // interval (see passes.wgsl fs_lens_state).
     if (lens !== null && !(Number.isFinite(lens.dt) && lens.dt >= 0)) {
       throw new Error(`drawFrame: lens.dt must be a finite dt >= 0; got ${lens.dt}.`);
     }
     // `liveSteam` (the live loop's): the city's steam is drawn after the
-    // accumulation at the view's clock (raymarch.wgsl fs_steam_live), and
+    // accumulation at the view's clock (passes.wgsl fs_steam_live), and
     // the clock leaves the scene key, so it runs over a parked picture that
     // goes on converging. Only the live loop asks for it; every other
     // caller marches the steam, exact.
@@ -1469,10 +1473,8 @@ export class Renderer {
                         surfacePipelines);
 
       // The accumulator ping-pongs between two textures, so there are exactly
-      // two bind groups for the whole life of a target set. They were being
-      // built from scratch every frame — along with three texture views — for
-      // a pair of resources that only change when the render target is
-      // reallocated, which is where they are now built instead.
+      // two bind groups for the whole life of a target set. They are built
+      // when the render target is allocated, not every frame.
       outTex = this._accumIndex === 0 ? targets.accumB : targets.accumA;
       const p = sPass(outTex.createView());
       p.setPipeline(this.accumPipeline);
@@ -1513,11 +1515,10 @@ export class Renderer {
    * server vblank bug); a present that sits behind more than that much
    * queued work times out, Chrome calls the swapchain hung, and it
    * restarts the GPU process — which loses every WebGPU device with "A
-   * valid external Instance reference no longer exists". The video loop
-   * used to queue a whole video frame's marches before the read-back
-   * synced: 32 of them at Max, 1.5–2.5 s at 1080p on a 5080, so a heavier
-   * frame crossed the line and the render died an hour in (Thomas,
-   * 2026-09-01: seven minutes in, at the same signature in his journal).
+   * valid external Instance reference no longer exists". A video loop that
+   * queues a whole video frame's marches before the read-back syncs puts
+   * 32 of them in the queue at Max, 1.5–2.5 s at 1080p on a 5080, so a
+   * heavier frame crosses the line and the render dies minutes in.
    * Metal's command-buffer watchdog is the same shape of limit.
    *
    * Two in flight rather than one: the GPU always has the next march ready
@@ -1546,19 +1547,20 @@ export class Renderer {
   /**
    * Configure the renderer for an offline render (a still, a video) at
    * `tier`; endOffline puts the live state back. A capture at tier T marches
-   * what a PARKED T view converges to (Thomas, 2026-09-01): T's lighting
+   * what a PARKED T view converges to: T's lighting
    * method and parked spp, but the hold ladder's TOP-rung sampling — High's
    * step factors for every tier — never the flight stepping. The offline
    * paths drive drawFrame directly and never climb the ladder, so without
-   * the explicit override here a minimal capture marched at minimal's flight
-   * step (4.0/12.0) while a parked minimal view marched at High's 2.0/2.0.
+   * the explicit override here a minimal capture would march at minimal's
+   * flight step (4.0/12.0) while a parked minimal view marches at High's
+   * 2.0/2.0.
    * Pure preset, no session overrides — which is also what keeps a capture
    * reproducible from the CLI: witness --quality applies the same recipe
    * with nothing invisible mixed in.
    *
    * The one deviation from "parked, full stop": render scale is 1.0 at the
-   * capture's explicit pixel size, not the tier's hold-scale cap (0.5 on
-   * minimal, 0.25 in the old table's terms). Those caps are interactivity
+   * capture's explicit pixel size, not the tier's hold-scale cap
+   * (HOLD_RENDER_SCALE_BY_TIER). Those caps are interactivity
    * concessions — a frame someone is waiting to fly out of — and a capture
    * has no frame to protect.
    */
@@ -1782,12 +1784,6 @@ export class Renderer {
       });
   }
 
-  /**
-   * Overlays are encoded into the SAME command buffer as the frame they sit
-   * on, after the blit that put it on screen. A separate submit would work
-   * but would let the compositor pick up the bare frame in between, which
-   * reads as the minimap flickering.
-   */
   /** Lens water's state-step pipeline for a lighting method. */
   _lensPipeline(lighting) {
     return this._pipeline("fs_lens_state", SURFACE_FORMAT,
@@ -1895,7 +1891,7 @@ export class Renderer {
 
   /**
    * The live steam over the accumulated image `accTex`, into the set's live
-   * target, which the present then draws (raymarch.wgsl fs_steam_live): the
+   * target, which the present then draws (passes.wgsl fs_steam_live): the
    * steam at the clock in u.scene_clock, along the last march's rays, to its
    * surface. Returns the live target.
    */
@@ -2046,8 +2042,8 @@ export class Renderer {
 
   invalidateLightCache() {
     // The abandoned bake's slice texture, not just the reference to it: a
-    // sun drag invalidates once per event, and each orphaned slice held its
-    // cz*cy texels until the tab closed. Fenced — the bake's last copy
+    // sun drag invalidates once per event, and each orphaned slice would hold
+    // its cz*cy texels until the tab closed. Fenced — the bake's last copy
     // into the cache may still be in flight.
     if (this._lightBake) {
       retireAfterSubmittedWork(this.device, this._lightBake.sliceTex);
@@ -2062,7 +2058,7 @@ export class Renderer {
    * "does the cache fit next to this volume" is to ask for it and listen on
    * an out-of-memory error scope. Throws a plain-language error when it
    * does not fit — the loader treats that like any other GPU-OOM and
-   * rejects the field, rather than silently degrading (Thomas, 2026-08-20).
+   * rejects the field, rather than silently degrading.
    * Same-size reallocation is skipped, so sun re-bakes never re-probe.
    */
   async allocateLightCache(divisor = K.LIGHT_CACHE_DIVISOR) {
@@ -2314,9 +2310,9 @@ export class Renderer {
       return sum / (lums.length - rank);
     } finally {
       // Errors are the caller's: null means only "not now" (a reading in
-      // flight, or its pipelines compiling — both end). A meter that failed
-      // used to return null as well, and a capture waiting for a reading
-      // then asked again forever.
+      // flight, or its pipelines compiling — both end). A failed meter that
+      // returned null too would leave a capture waiting for a reading
+      // asking again forever.
       this._meterBusy = false;
     }
   }

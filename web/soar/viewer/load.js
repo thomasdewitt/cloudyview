@@ -50,16 +50,6 @@ export const load = {
   },
 
   /**
-   * Load (or replace) the field. Everything resident on the GPU for the old
-   * one is released first — a second field would otherwise sit alongside the
-   * first, and these are gigabytes.
-   *
-   * The new field is built into locals and only committed once all of it
-   * exists. A shader that fails to compile half-way through would otherwise
-   * leave a volume texture with no owner and no reference: gigabytes that
-   * only a garbage collector knows about, released whenever it feels like it.
-   */
-  /**
    * The surface tiles are not anything about the data — the ocean is a
    * patch of sea surface, the city a patch of city — so they survive a
    * change of field and belong to the viewer, which is what disposes of
@@ -82,6 +72,16 @@ export const load = {
                           { schema: K.SURFACE_TILE_SCHEMAS.ocean }));
   },
 
+  /**
+   * Load (or replace) the field. Everything resident on the GPU for the old
+   * one is released first — a second field would otherwise sit alongside the
+   * first, and these are gigabytes.
+   *
+   * The new field is built into locals and only committed once all of it
+   * exists. A shader that fails to compile half-way through would otherwise
+   * leave a volume texture with no owner and no reference: gigabytes that
+   * only a garbage collector knows about, released whenever it feels like it.
+   */
   async loadField(source, progress) {
     await this._releaseField();
 
@@ -115,7 +115,7 @@ export const load = {
       if (scene.periodicDefault === false) renderer.setPeriodic(false);
       // Choose the tier BEFORE init(), because init() is what compiles and
       // validates the shader, and the shader is specialized on the tier's
-      // maxLightSteps. Setting it afterwards would compile a module for a
+      // lighting method. Setting it afterwards would compile a module for a
       // tier no frame is ever drawn at, and would make the probe's first
       // frame pay for a second compile.
       renderer.setQualityTier(this._startingQualityTier());
@@ -206,9 +206,7 @@ export const load = {
                                      // in it alongside the cloud one (see
                                      // FlightCamera's surfacePosition), so
                                      // neither the city nor the water jumps
-                                     // when the cloud frame folds ("the
-                                     // ocean should never jump" — Thomas,
-                                     // 2026-09-01).
+                                     // when the cloud frame folds.
                                      // Folded at the surface's own period:
                                      // the tile for the city, 16 tiles
                                      // for the sea (constants.js
@@ -271,8 +269,9 @@ export const load = {
       this._loadNotesUntil = 0;
     }
 
-    // The sun-shadow cache is a standing resource now — every tier but Max
-    // reads it — so it is allocated HERE, where failing is still a clean
+    // The light cache is a standing resource — every tier reads its sky
+    // channel, every tier but Max its sun channel — so it is allocated
+    // HERE, where failing is still a clean
     // load rejection: the allocation is the memory probe (WebGPU has no
     // free-VRAM query), and a field whose cache does not fit fails like any
     // other GPU-OOM instead of degrading silently.
@@ -335,9 +334,9 @@ export const load = {
           onCancel: cancel,
         });
       } else if (question.panel === "axes") {
-        // Detection could not tell the dimensions apart. This is the reason
-        // a failed load is no longer a dead end: the panel is offered
-        // INSTEAD of the error, not after it.
+        // Detection could not tell the dimensions apart. The panel is
+        // offered INSTEAD of the error, not after it, so a failed detection
+        // is not a dead end.
         this.ui.open("axes", {
           dims: question.dims, filename: question.filename,
           reason: question.reason,

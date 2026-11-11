@@ -89,9 +89,8 @@ const COURSE_MIN_SPEED = 0.5;   // m/s
 // flyer comes out with is the one it would have had. The roll is the big
 // one — a wing catches, the thing goes over — and the yaw is what a wall
 // does to a nose that meets it off-square. A landing (the street, a roof)
-// is the same at LANDING_KNOCK of the size: a stumble, not a tumble.
-// (Raised by about half in 2026-11, roll past the vertical at a full-speed
-// crash, at Thomas's ask for a crash that rocks the plane harder.)
+// is the same at LANDING_KNOCK of the size: a stumble, not a tumble. A
+// full-speed crash rolls the plane past the vertical.
 const KNOCK_ROLL_DEG = 110.0;
 const KNOCK_PITCH_DEG = 42.0;
 const KNOCK_YAW_DEG = 60.0;
@@ -361,7 +360,7 @@ export class Flyer {
    * The flight hit something (collide.js): tumble for `duration` seconds.
    * `severity` is 0..1, `side` +-1 is which way the impact threw it, and a
    * `landing` — the street or a roof, from above — tumbles less. `age` is
-   * how long ago it happened: a replayed track (viewer.js) lands its video
+   * how long ago it happened: a replayed track (viewer/capturing.js) lands its video
    * frames between the recorded ones, so its knock starts part-way in.
    */
   knock({ severity, side, duration, landing, age = 0.0 }) {

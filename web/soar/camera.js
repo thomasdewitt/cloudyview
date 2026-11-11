@@ -1,5 +1,5 @@
 // Camera basis, the relative<->world coordinate convention, and the flight
-// controller. Ports cloudyview/camera.py plus FlyThroughApp's movement half.
+// controller. The basis and the convention are cloudyview/camera.py's.
 
 "use strict";
 
@@ -60,16 +60,12 @@ export function worldToRelative(pos, bmin, bmax) {
 }
 
 /**
- * Flight state and the controls that move it. World metres and meteorological
- * angles throughout; relative coordinates appear only at the edges.
- */
-/**
  * Where flight begins.
  *
- * A demo baked since 2026-08-14 carries the camera its landing-page still was
- * taken from, so clicking a case opens on the picture that was clicked rather
- * than on a generic view of the same field. Absent is normal — older bakes
- * and any user's own file have none, and those get DEFAULT_CAMERA.
+ * A baked demo carries the camera its landing-page still was taken from, so
+ * clicking a case opens on the picture that was clicked rather than on a
+ * generic view of the same field. Absent is normal — a user's own file has
+ * none, and gets DEFAULT_CAMERA.
  *
  * Present but malformed is NOT normal: it means a bake wrote a camera nobody
  * can use, and quietly flying somewhere else would hide that for as long as
@@ -92,6 +88,10 @@ function startCamera(start) {
   };
 }
 
+/**
+ * Flight state and the controls that move it. World metres and meteorological
+ * angles throughout; relative coordinates appear only at the edges.
+ */
 export class FlightCamera {
   constructor(bmin, bmax, { periodic = true, start = null,
                             // The scene's SECOND periodic frame: the surface
@@ -233,10 +233,10 @@ export class FlightCamera {
    * move path, so the surface frame keeps its phase, as displace does; but
    * this is a jump, not flight, so the epoch bumps and whatever tracks the
    * flight from frame to frame starts again. Through displace, the
-   * collider's next resolve swept the jump as one frame of flight — tens of
-   * kilometres through the city from wherever the camera stood — and left
-   * the camera at the first wall on the way, on another street and hundreds
-   * of metres up (steam_live_qa --pose-png, 2026-11-09).
+   * collider's next resolve would sweep the jump as one frame of flight —
+   * tens of kilometres through the city from wherever the camera stood — and
+   * leave the camera at the first wall on the way, on another street and
+   * hundreds of metres up.
    */
   jump(dx, dy, dz) {
     this._translate(dx, dy, dz);
@@ -300,10 +300,10 @@ export class FlightCamera {
    * WASD is the ground plane; Space and Shift are the only way to change
    * altitude.
    *
-   * W used to walk the full view direction, so looking up and holding W
-   * climbed — which meant altitude was coupled to where you happened to be
-   * pointing and could not be held while looking at anything. Splitting the
-   * two lets you fly level across the domain and look wherever you like.
+   * If W walked the full view direction, looking up and holding W would
+   * climb — altitude coupled to where you happen to be pointing, and not
+   * held while looking at anything. Splitting the two lets you fly level
+   * across the domain and look wherever you like.
    *
    * The horizontal forward comes from the azimuth directly rather than by
    * flattening the view vector, which would shrink to nothing (and then
@@ -333,7 +333,7 @@ export class FlightCamera {
    * wrapping rather than stopping. Crossing a lateral face puts you at
    * the opposite one; flight is endless. The fold is at the CLOUD period and
    * nothing else: the surface tile's frame keeps its own phase in
-   * surfacePosition, so this fold no longer has to be one the tile can live
+   * surfacePosition, so this fold does not have to be one the tile can live
    * with.
    */
   constrain() {

@@ -1,6 +1,6 @@
 """The city's graffiti dissolves into exactly its own mean.
 
-raymarch.wgsl's CITY GRAFFITI section paints a run in three rungs keyed on
+city/graffiti.wgsl paints a run in three rungs keyed on
 the pixel footprint: FINE (the strokes), MID (each element as its box at
 its expected density) and FAR (the layer's expectation along the run, in
 closed form). For the paint to dissolve without a seam the three must
@@ -16,7 +16,7 @@ the shader, through tools/city_graffiti_harness.py's kernels:
     composited paint agrees with FAR over the band to second order; and a
     negative control (one area constant off by a fifth) fails.
 
-Skips without a wgpu adapter. Run under tools/gpulock.
+Skips without a wgpu adapter.
 """
 
 import importlib.util

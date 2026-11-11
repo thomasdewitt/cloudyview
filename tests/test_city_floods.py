@@ -1,6 +1,7 @@
 """The industrial belt's flood pools: the far-field mean is the near field's.
 
-raymarch.wgsl paints each floodlight's pool as an anisotropic Gaussian on the
+The shader (city/floods.wgsl) paints each floodlight's pool as an
+anisotropic Gaussian on the
 ground of its own lot (city_flood_pool) — lopsided along its aim, and cut at
 the wall for a wall pack —
 and, once the pixel footprint outgrows a pool, hands over to the pools' mean

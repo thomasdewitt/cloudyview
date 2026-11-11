@@ -59,7 +59,7 @@ export const commands = {
       // hand them to night_city_harness.py --city-camera.
       //
       // Additive, and the schema string stays v1: every reader keys on the
-      // presence of a block, and cloudyview/render_metadata.py's SCHEMA is
+      // presence of a block, and cloudyview/track.py's HEADER_SCHEMA is
       // the only other copy of that string. Do not bump one without the
       // other.
       ...(cityPos ? {
@@ -99,13 +99,11 @@ export const commands = {
         tone_map_gamma: this.toneMapGamma,
         tone_map_white_point: this.toneMapWhitePoint,
         contrast: this.contrast,
-        // The look the CAPTURE marched, not the session's (2026-09-01): a
+        // The look the CAPTURE marched, not the session's: a
         // named tier is the pure parked preset — its haze default, its
         // parked LOD, a once-metered exposure — and Custom is the session's
         // values, so `look` is right in both cases where the live fields
-        // were right in neither. This block has misreported before (the
-        // unscaled-constants bug, then the finer-slider bug); the rule now
-        // is that everything here comes from `look`.
+        // are right in neither. Everything here comes from `look`.
         haze: look.haze,
         haze_height_dependent: look.hazeHeightDependent,
         // The scene clock the still was taken at (witness --time): for a
@@ -280,20 +278,6 @@ export const commands = {
   },
 
   /**
-   * Unlike behold, witness drives the exact WGSL this view was drawn with,
-   * so its command reproduces the view completely: both nested levels, the
-   * periodic wrap, and the image controls — which are display state a
-   * default render would not carry. The image controls are always written
-   * out rather than only when non-default, because "exactly this view" must
-   * survive a change of defaults.
-   *
-   * The overrides are the capture's honesty trail: renderMetadata passes the
-   * look the capture actually marched (a named tier's parked defaults, or
-   * Custom's session values), so the command reproduces the CAPTURE — at
-   * the capture's pixel size too, which is not the canvas's. With no
-   * overrides — the terminal panel — the live values go out.
-   */
-  /**
    * The surface offset this view renders with (u.surface_offset, folded into
    * [0, tileExtent)): the same fold-first subtraction packUniforms makes,
    * or null when the camera has no surface frame.
@@ -326,6 +310,20 @@ export const commands = {
     return ["--surface-origin", n(off[0]), n(off[1])];
   },
 
+  /**
+   * Unlike behold, witness drives the exact WGSL this view was drawn with,
+   * so its command reproduces the view completely: both nested levels, the
+   * periodic wrap, and the image controls — which are display state a
+   * default render would not carry. The image controls are always written
+   * out rather than only when non-default, because "exactly this view" must
+   * survive a change of defaults.
+   *
+   * The overrides are the capture's honesty trail: renderMetadata passes the
+   * look the capture actually marched (a named tier's parked defaults, or
+   * Custom's session values), so the command reproduces the CAPTURE — at
+   * the capture's pixel size too, which is not the canvas's. With no
+   * overrides — the terminal panel — the live values go out.
+   */
   witnessCommand({ size = [this.canvas.width, this.canvas.height],
                    lodStrength = this.lodStrength,
                    haze = this.haze,

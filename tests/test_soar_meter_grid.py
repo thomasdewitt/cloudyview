@@ -5,7 +5,7 @@ highlight statistic. The shader takes the frame's aspect from the OUTPUT
 size (row 1.w) and its pixel angle from the grid's width, so a meter grid
 of any other shape than the window's has oblong pixels: the fixed 64x36 did
 everywhere but 16:9, and in a portrait window each meter pixel was ~3x
-taller than wide (loose-ends, 2026-11-08). meterSize (uniforms.js) now
+taller than wide. meterSize (uniforms.js) now
 gives the grid the output's shape at about AUTO_EXPOSURE_METER_RAYS rays,
 and tools/prebake_demos.py's meter (which metered 96 wide) uses the same
 rule, pinned here to the browser's.

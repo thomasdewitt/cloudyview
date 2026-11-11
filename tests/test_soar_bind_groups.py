@@ -1,4 +1,4 @@
-"""Every host must bind exactly what raymarch.wgsl declares.
+"""Every host must bind exactly what the shader (uniforms.wgsl) declares.
 
 There is one renderer core and three places that wire resources into it: the
 browser's Renderer (its layout, its main bind group, and the separate one the
@@ -129,7 +129,7 @@ def test_every_host_binds_what_the_shader_declares():
 
 
 def test_every_host_lays_out_the_surface_group():
-    """Group 1 is the surface pre-pass's target (raymarch.wgsl), read by the
+    """Group 1 is the surface pre-pass's target (uniforms.wgsl), read by the
     march: the same binding numbers in the shader, the browser's surface
     layout and the Python host's."""
     source = SHADER.read_text()

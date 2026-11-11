@@ -40,10 +40,10 @@ from .cli import (
 
 
 # Quality presets: resolution, samples per pixel, path-depth budgets.
-# Depths cut hard 2026-08-18 (Thomas: "It's honestly simply not tractable
-# ever as it is"): clouds bury most of the path budget in dense multiple
-# scattering, so min through high now truncate early and eat the bias.
-# 'max' keeps the deep budgets for when time doesn't matter.
+# Depths are cut hard: clouds bury most of the path budget in dense multiple
+# scattering, and deep budgets are intractable, so min through high
+# truncate early and eat the bias. 'max' keeps the deep budgets for when
+# time doesn't matter.
 QUALITY_MAP = {
     'min': {'resolution': (150, 100), 'spp': 1, 'rr_depth': 1, 'max_depth': 2},
     'low': {'resolution': (300, 200), 'spp': 32, 'rr_depth': 2, 'max_depth': 4},

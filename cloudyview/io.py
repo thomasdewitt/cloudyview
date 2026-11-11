@@ -730,9 +730,9 @@ def _candidate_coords(
 
       1. The dimension's own variable — the CF coordinate-variable
          convention, and the strongest signal there is.
-      2. THIS axis's candidate names (the sweep used to run the x, y and z
-         lists concatenated, which on a cubic grid could hand z the variable
-         called `x`).
+      2. THIS axis's candidate names (a sweep over the x, y and z lists
+         concatenated could, on a cubic grid, hand z the variable called
+         `x`).
       3. Any 1-D variable of the right length. Loose, and last.
 
     Returns [(name, DataArray)], deduplicated by name.
@@ -1332,7 +1332,7 @@ def load_and_validate(
                 else:
                     # Non-length or unrecognized units raise out of here:
                     # a coordinate that cannot be read cannot be checked,
-                    # and pretending otherwise is the old bug.
+                    # and pretending otherwise would be a silent wrong answer.
                     _, iw_c = _lookup_axis_coord(
                         iw_spatial, [iw_ds], axis, axis_dim, scratch,
                         fallback_coord_units)

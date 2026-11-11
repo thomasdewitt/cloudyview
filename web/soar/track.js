@@ -1,4 +1,5 @@
-// Flight-track recording and resampling. Port of cloudyview/soar/track.py.
+// Flight-track recording and resampling. cloudyview/track.py's resampler is
+// a port of this one, pinned against it by tests/test_track_resample.py.
 //
 // Recording captures only the TRACK — per-frame (t, camera) samples plus the
 // render header — not pixels. The video pass then resamples that track at an
@@ -28,8 +29,8 @@
 // byte-identical to v1's; a camera without one writes 7 columns, and a v1
 // track loads and resamples the same way.
 //
-// v3 appended scene_t, the scene clock (s) the frame was drawn at — then
-// where the moving sea was, now the city's steam — so a re-render has the
+// v3 appended scene_t, the scene clock (s) the frame was drawn at — the
+// city's steam reads it — so a re-render has the
 // motion the flight had. It is its own column rather than a function of t
 // because the clock is the scene's, not the recording's. v1 and v2 tracks
 // have none and replay at clock 0; over a surface with no clock (the sea)
@@ -217,8 +218,8 @@ export function resampleTrack(samples, fps,
   }
   // 10 columns is a v3/v4 sample (surface frame and scene clock); 9 is v2 (no
   // clock: replays at 0); 7 is a v1 recording — those predate the surface
-  // frame and replay with zero drift (the old behavior, not repairable: the
-  // fold already lost which tile copy the flight was in). A mix is a
+  // frame and replay with zero drift (not repairable: the fold already lost
+  // which tile copy the flight was in). A mix is a
   // corrupt track, not a choice to make quietly.
   const widths = new Set(unique.map((s) => s.length));
   if (widths.size !== 1

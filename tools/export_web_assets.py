@@ -56,20 +56,20 @@ CITY_OUT = REPO / "cloudyview" / "soar" / "city"
 
 CITY_SEED = 20260820
 # The city's clock period (surfaces.surface_clock_period_s): where its
-# animation — the manhole steam, city-street's cc_manholesteam — repeats
+# animation — the manhole steam, components/manholesteam.wgsl — repeats
 # exactly. The steam's noise rises 1.3 * 1.2 = 1.56 lattice cells a second
 # and its lattice wraps at 4056 cells, so 2600 s is a whole number of every
 # octave's cycles and the hosts' wrap of the clock there shows nothing.
 CITY_CLOCK_PERIOD_S = 2600.0
 
-# 1024 texels of 0.1 m: the 102.4 m tile, twice as fine as the 512 of 0.2 m
-# it replaced (2026-11-08), so a low pass over the water still resolves wave
+# 1024 texels of 0.1 m: the 102.4 m tile, twice as fine as 512 of 0.2 m,
+# so a low pass over the water still resolves wave
 # texture a few hundred metres out. Stored byte-shuffled and gzipped
 # (5.2 MiB on the wire, 10.7 MiB on the card).
 FIF_N = 1024
 FIF_DX_M = 0.1
 FIF_SEED = 20260717
-# The scaleinvariance the shipped tile was baked with (PyPI, 2026-11-08).
+# The scaleinvariance release (PyPI) the shipped tile was baked with.
 OCEAN_BAKED_WITH = "0.14.0"
 
 

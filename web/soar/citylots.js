@@ -1,14 +1,15 @@
-// The night city's buildings, on the CPU: a mirror of raymarch.wgsl's
-// city_cell, and a swept-segment query against what it builds.
+// The night city's buildings, on the CPU: a mirror of the shader's
+// city_cell (city/layout.wgsl), and a swept-segment query against what it
+// builds.
 //
 // The city is a pure function of the tile frame — one rgba16float texel per
 // 90 m block (r density, g rank, b the packed lot word, a the street word;
-// see cloudyview/city_lots.py) — and every building the renderer draws is
+// see tools/city_lots.py) — and every building the renderer draws is
 // raised out of that texel by city_cell. Flight collision needs the same
 // buildings, not a lookalike: a wall the plane bounces off has to be the wall
 // on screen, to the centimetre, or you either bounce off air or fly into a
 // facade and watch it vanish (the renderer does not draw a building from the
-// inside — which is exactly the bug this module exists to end). So the port
+// inside). So the port
 // is literal: the same hashes bit for bit, the same draws in the same order,
 // the same variable names, and the storey quantization evaluated in float32
 // the way the GPU evaluates it. tests/test_city_lots_mirror.py runs the WGSL
@@ -20,8 +21,6 @@
 // archetypes 3 and 4, the mast, and the ground plane. What the components
 // stand among them — the freeways, lamp posts, parked cars, skybridges and
 // warehouse roof ridges — is cityprops.js's, handed to CityLots as `props`.
-// (Until 2026-11 those were scenery the flyer passed through; Thomas: "it
-// seems like all these should be solid. why not?")
 //
 // city_cell below is kept line for line with the WGSL so that re-syncing
 // after a change there is a diff read, not a re-derivation. It deliberately
@@ -33,7 +32,7 @@
 import { fromHalf } from "./half.js";
 import { insidePolytope, segmentPolytope } from "./polytope.js";
 
-// --- raymarch.wgsl constants (names identical; pinned by the mirror test) ---
+// --- the shader's constants (names identical; pinned by the mirror test) ---
 export const CITY_GROUND_Z = 0.0;
 export const CITY_PER_STOREY = 0.2777777777777778;
 export const CITY_MAX_STOREYS = 1500.0;
@@ -88,11 +87,11 @@ export const CITY_CROWN_PAD_T = 0.30;
 // operation, as the shader evaluates them — with the constants rounded to
 // float32 first, because the shader's literals are.
 //
-// The shader carries ns and multiplies because it once divided: NVIDIA
-// compiles x / 3.6 as x times the rounded reciprocal, which put those
-// quarter-integer levels a storey high on one GPU and not on another (found
-// by this file's mirror test, 2026-09-23; city_cell changed to products,
-// which float32 rounds exactly everywhere). What still differs between GPUs
+// The shader carries ns and multiplies rather than divides: NVIDIA
+// compiles x / 3.6 as x times the rounded reciprocal, which puts those
+// quarter-integer levels a storey high on one GPU and not on another (the
+// mirror test finds it); products float32 rounds exactly everywhere. What
+// still differs between GPUs
 // is pow() in the height law, at the ulp level: a building whose raw height
 // sits within an ulp of a storey boundary can come out a storey different.
 const f = Math.fround;
@@ -116,7 +115,7 @@ function smoothstep(e0, e1, x) {
 // brings every sum back to an unsigned 32-bit value (the sums stay below
 // 2^53, so the double arithmetic before the wrap is exact).
 
-/** raymarch.wgsl pcg2d. Takes and returns two u32s. */
+/** The shader's pcg2d (math.wgsl). Takes and returns two u32s. */
 export function pcg2d(x, y) {
   let vx = (Math.imul(x, 1664525) + 1013904223) >>> 0;
   let vy = (Math.imul(y, 1664525) + 1013904223) >>> 0;
@@ -131,12 +130,12 @@ export function pcg2d(x, y) {
   return [vx, vy];
 }
 
-/** raymarch.wgsl city_u01: f32(x) rounds to 24 bits BEFORE the scale. */
+/** math.wgsl city_u01: f32(x) rounds to 24 bits BEFORE the scale. */
 export function cityU01(x) {
   return f(x) * 2.3283064365386963e-10;
 }
 
-/** raymarch.wgsl city_rand4. */
+/** city/layout.wgsl city_rand4. */
 export function cityRand4(sx, sy) {
   const a = pcg2d(sx, sy);
   const b = pcg2d(a[0], a[1]);
@@ -153,7 +152,8 @@ const xorSeed = (s, kx, ky) => [(s[0] ^ kx) >>> 0, (s[1] ^ ky) >>> 0];
  * rgba16float bytes the renderer uploads (fp16 -> f32 is exact, so these
  * are the values textureLoad returns).
  *
- * The b and a channels carry integer words offset by -2048 (city_lots.py).
+ * The b and a channels carry integer words offset by -2048
+ * (tools/city_lots.py).
  * A texel whose word is not such an integer is a tile baked by something
  * that does not know the packing — the renderer would decode garbage lots
  * out of it and so would this — so it refuses the tile at load rather than
@@ -210,18 +210,18 @@ export class CityTile {
   }
 }
 
-/** raymarch.wgsl city_tile_cell: an index folded into [0, n). */
+/** city/layout.wgsl city_tile_cell: an index folded into [0, n). */
 export function tileCell(n, k) {
   return ((k % n) + n) % n;
 }
 
-/** raymarch.wgsl city_is_avenue. */
+/** city/layout.wgsl city_is_avenue. */
 export function isAvenue(k) {
   return ((k % CITY_AVENUE_PERIOD) + CITY_AVENUE_PERIOD)
          % CITY_AVENUE_PERIOD === 0;
 }
 
-/** raymarch.wgsl city_word. */
+/** city/layout.wgsl city_word. */
 function cityWord(v) {
   return (v + CITY_WORD_OFFSET) >>> 0;
 }
@@ -230,7 +230,7 @@ const vec3 = (xy, z) => [xy[0], xy[1], z];
 const ZERO3 = () => [0.0, 0.0, 0.0];
 
 /**
- * raymarch.wgsl city_cell, geometry only. `(cx, cy)` is the UNWRAPPED cell
+ * city/layout.wgsl city_cell, geometry only. `(cx, cy)` is the UNWRAPPED cell
  * index — the geometry comes back in the unwrapped city frame (cell i spans
  * [i * cell, (i + 1) * cell)), exactly as the shader builds it, while
  * texels and seeds read the tile-wrapped index.
@@ -610,7 +610,7 @@ export function cityCell(tile, cx, cy) {
   } else {
     c.top_z = h;
   }
-  // The crown's headroom, as a bound (raymarch.wgsl city_cell).
+  // The crown's headroom, as a bound (city_cell).
   if (h > CITY_CROWN_MIN_H && c.arch !== 4) {
     c.top_z = Math.max(c.top_z, f(h + CITY_CROWN_H_HI));
   }
@@ -627,7 +627,7 @@ const F32_0_30 = f(0.30), F32_0_40 = f(0.40);
 const f32Mix = (a, b, t) => f(f(a * f(1.0 - t)) + f(b * t));
 
 /**
- * raymarch.wgsl city_crown: the penthouse (kind 1) on a tall tower's summit
+ * city/facade.wgsl city_crown: the penthouse (kind 1) on a tall tower's summit
  * deck, or the helipad (kind 2) that pre-empts it, per CELL — the crown is
  * clipped to the cell column (cx, cy) and only a checkerboard of a merged
  * lot's cells carry one. Every comparison is the shader's, in float32.
@@ -730,10 +730,10 @@ export function cityCrown(c, cx, cy, cell, n) {
 // building grows by its own relief — its deepest feature, on every face
 // and between the features too, which is the building's envelope rather
 // than the wall behind it — and the flight meets the building where it
-// stands out. (It grew every building by the deepest any style
-// allows, CITY_SHELL_OUT_MAX, until 2026-11: a curtain wall stopped you
-// 1.5 m short of its glass, and Thomas noticed — "it happens a bit before
-// the airplane actually contacts the building".) Roofs stay exact (nothing
+// stands out. (Growing every building by the deepest any style allows,
+// CITY_SHELL_OUT_MAX, would stop you 1.5 m short of a curtain wall's glass,
+// and that reads as a crash before the plane touches the building.) Roofs
+// stay exact (nothing
 // stands on them from the shell) and nothing hangs below a box. The
 // frustum's sloped skin and the masts carry no shell.
 //
@@ -748,15 +748,15 @@ export function cityCrown(c, cx, cy, cell, n) {
 // walk visits tests its eight neighbours as well. That is exact as long as
 // the growth is under a cell, which checkReach() holds.
 
-// raymarch.wgsl's facade shell: the deepest relief any style may carry, and
+// The facade shell (city/facade.wgsl): the deepest relief any style may carry, and
 // the two deepest features.
 export const CITY_SHELL_OUT_MAX = 1.5;
 export const CITY_ESCAPE_OUT = 1.25;
 export const CITY_BALCONY_OUT = 1.10;
-// A core strip's proud front (raymarch.wgsl's facade zones).
+// A core strip's proud front (city/facade.wgsl's facade zones).
 export const CITY_CORE_OUT = 0.45;
 
-/** raymarch.wgsl city_escape_building: the building carries a fire escape. */
+/** city/facade.wgsl city_escape_building: the building carries a fire escape. */
 function escapeBuilding(c) {
   const h = cityRand4(...xorSeed(c.seed, 0x1b873593, 0xcc9e2d51));
   return (c.win_style === 4 || c.win_style === 0)
@@ -764,14 +764,14 @@ function escapeBuilding(c) {
     && c.height >= 18.0 && c.height <= 66.0 && h[0] < f(0.25);
 }
 
-/** raymarch.wgsl city_core_building: the building carries core strips. */
+/** city/facade.wgsl city_core_building: the building carries core strips. */
 function coreBuilding(c) {
   const h = cityRand4(...xorSeed(c.seed, 0x9b05688c, 0x1f83d9ab));
   return c.land_use === CITY_USE_URBAN && c.height > 40.0
     && c.win_style !== 4 && h[0] < f(0.5);
 }
 
-/** raymarch.wgsl city_balcony_building: balconies (never with an escape). */
+/** city/facade.wgsl city_balcony_building: balconies (never with an escape). */
 function balconyBuilding(c) {
   const h = cityRand4(...xorSeed(c.seed, 0x27220a95, 0x165667b1));
   return (c.win_style === 0 || c.win_style === 4 || c.win_style === 1)
@@ -782,7 +782,7 @@ function balconyBuilding(c) {
 
 /**
  * How far the facade shell's relief stands off this building's walls: the
- * depth raymarch.wgsl city_shell_style gives the building's shell layer,
+ * depth city/facade.wgsl city_shell_style gives the building's shell layer,
  * draw for draw (only the draws that move the depth are mirrored). Zero on
  * an industrial lot, whose walls the shell leaves to the industry
  * component, which hangs nothing off them.
@@ -886,7 +886,7 @@ function segmentBox(p0, d, { min, max, grow }) {
 }
 
 /**
- * The rectangular frustum of archetypes 3 and 4, as raymarch.wgsl
+ * The rectangular frustum of archetypes 3 and 4, as the shader
  * city_frustum_hit builds it (cross-section centred on the footprint,
  * scale 1 at fmin.z running linearly to fscale at fmax.z), grown by the
  * shell sideways and by r along every face.

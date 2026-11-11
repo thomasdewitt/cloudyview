@@ -38,10 +38,9 @@ def quantize_uint8(
 
     Two details that matter:
 
-    - The rounding is round-to-nearest, not the truncation this used to do.
-      Truncation is a uniform -0.5 LSB bias, i.e. every image the toolkit has
-      ever written was half a level dark; with a symmetric dither it would
-      also defeat the dither's zero mean.
+    - The rounding is round-to-nearest, not truncation. Truncation is a
+      uniform -0.5 LSB bias, i.e. every image half a level dark; with a
+      symmetric dither it would also defeat the dither's zero mean.
     - The dither tapers to zero within one level of the 0 and 255 rails, so a
       clipped highlight or a true black stays exactly clipped rather than
       picking up speckle. Clipping the dithered value instead would reintroduce
@@ -96,8 +95,8 @@ def save_image(
 #
 # This is turbulon-analysis's albedo-field ramp
 # (fractal-analysis/scripts/plot_albedo_fields.py), adopted here so a glimpse
-# and a paper figure of the same field are the same picture. It replaces a
-# two-stop interpolation from #3A4AA6, a violet-leaning blue that read as a
+# and a paper figure of the same field are the same picture. Not a two-stop
+# interpolation from a violet-leaning blue like #3A4AA6, which reads as a
 # colour scheme rather than as water.
 #
 # The stops matter as much as the endpoints: the ramp is deliberately monotone
@@ -223,13 +222,13 @@ def plot_optical_depth(
         fov_endpoints = camera_overlay.get('fov_endpoints', [])
         circle_radius = camera_overlay.get('circle_radius')
         # Constants in points, not functions of the grid. The image is always
-        # `long_side_px` on its long side whatever the field's shape, so the
-        # old `max(nx, ny) / 900` grew the annotation with the number of cells
-        # while the picture it sits on stayed the same size — a 4096-cell
-        # field got a marker twice the weight of a 1024-cell one for no
-        # reason the viewer could see. Roughly a 2 px line and an 17 px dot at
-        # 2048 px: enough to find, thin enough not to cover the structure it
-        # is pointing at, which the old 3 px lines did.
+        # `long_side_px` on its long side whatever the field's shape, so a
+        # size like `max(nx, ny) / 900` would grow the annotation with the
+        # number of cells while the picture it sits on stays the same size —
+        # a 4096-cell field would get a marker twice the weight of a
+        # 1024-cell one for no reason the viewer could see. Roughly a 2 px
+        # line and an 17 px dot at 2048 px: enough to find, thin enough not
+        # to cover the structure it is pointing at, which 3 px lines do.
         linewidth = 1.0
 
         if circle_radius is not None:

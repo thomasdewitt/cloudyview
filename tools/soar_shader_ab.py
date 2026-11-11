@@ -66,7 +66,7 @@ EXTRA_VIEWS = {
     # seam every domain width.
     "wrap_seam": {"camera_position": [0.95, 0.0, -0.9], "azimuth": 90,
                   "elevation": 0, "fov": 90},
-    # docs/soar-bugs.md 6: outside the domain, looking down, periodicity off.
+    # Outside the domain, looking down, periodicity off.
     # Most of these rays MISS the box, which is its own code path.
     "repro": {"camera_position": [1.25, 1.25, 1.2], "azimuth": 225,
               "elevation": -35, "fov": 95},

@@ -1,18 +1,18 @@
-"""raymarch.wgsl's tone_unmap is tone_map run backwards, on the GPU.
+"""The shader's tone_unmap (tonemap.wgsl) is tone_map run backwards, on the GPU.
 
 The live view's steam (fs_steam_live) composites in linear light onto an
 image accumulated in display values, so it needs the radiance a displayed
 value came from. tone_map is invertible wherever its clamps do not bite;
 there tone_unmap must return the radiance, and tone_map of what it returns
 must be the displayed value. This runs the two WGSL functions as written —
-cut out of raymarch.wgsl by name, over a stub of the two uniforms they read
+cut out of the shader by name, over a stub of the two uniforms they read
 (u.white_point, the white point; u.contrast, the contrast) — over
 radiances from deep shadow through the shoulder, at the ends of every
-slider's range. It also holds the two cases codex found broken in the
-first version: a highlight in the shoulder where its fixed point
-oscillated, and a dark value its quadratic root cancelled to 0.
+slider's range. It also holds two cases that break a naive inverse: a
+highlight in the shoulder where a fixed-point iteration oscillates, and a
+dark value a quadratic root cancels to 0.
 
-Skips without a real GPU adapter. Run it through tools/gpulock.
+Skips without a real GPU adapter.
 """
 
 import re

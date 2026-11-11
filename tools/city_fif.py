@@ -21,8 +21,8 @@ from scaleinvariance.simulation.FIF import extremal_levy
 DEFAULT_N = 1024
 DEFAULT_H = 0.0
 DEFAULT_ALPHA = 2.0
-# Lowered 0.1 -> 0.07 (Thomas, 2026-08-22). Less extreme clustering: the
-# districts stay legible instead of collapsing onto a few runaway spikes.
+# Mild clustering (0.1 is too extreme): the districts stay legible instead
+# of collapsing onto a few runaway spikes.
 DEFAULT_C1 = 0.07
 # Districts: the largest coherent structure the cascade builds, in cells.
 DEFAULT_OUTER_SCALE_CELLS = 256.0
@@ -43,8 +43,8 @@ def generate_city_density(
     height: the cascade normalized by its 99.5th percentile, UNCLIPPED —
         the building-height modulator with its whole lognormal tail. The
         extremes are the point: the rare 5x-8x excursions are the megatowers
-        that reach the cloud deck (Thomas, 2026-08-20: the tallest should
-        "poke into clouds", the distribution "not really clipped").
+        that reach the cloud deck: the tallest poke into the clouds, so the
+        distribution is not clipped.
     rank: the same field rank-transformed to exactly uniform [0, 1] — the
         thresholdable channel (building presence, lit fraction), so a cut at
         q keeps exactly (1-q) of the city whatever the cascade drew.

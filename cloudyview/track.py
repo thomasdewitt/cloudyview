@@ -48,7 +48,7 @@ repeating every tile, so any recorded period places it — a track flown at
 another (819.2 m for the moving sea's v3 tracks, the tile for v2's) has its
 sx/sy re-expressed at the installed period continuously, and the water
 under the flight moves with the flight, over a different patch of the same
-sea. The moving sea's v4 tracks (2026-09-23..25) were recorded at 1638.4 m
+sea. The moving sea's v4 tracks were recorded at 1638.4 m
 and replay as they are. The resampler unwraps sx/sy at half the period, so
 a track carries at most that between two samples: 819 m over the sea.
 Older tracks recorded no period, and theirs is known from the schema: a v3
@@ -90,7 +90,7 @@ TRACK_WIDTHS = {"cloudyview.track.v1": 7, "cloudyview.track.v2": 9,
                 "cloudyview.track.v3": 10, "cloudyview.track.v4": 10}
 TRACK_SCHEMAS = tuple(TRACK_WIDTHS)
 # The sea's surface period while v3 was the schema (the moving sea's first
-# tile, 2026-09-23); v3 recorded none, and this is the one it had.
+# tile); v3 recorded none, and this is the one it had.
 V3_OCEAN_PERIOD_M = 819.2
 HEADER_SCHEMA = "cloudyview.render.v1"
 
@@ -437,10 +437,10 @@ class TrackSettings:
     # The extent of the surface tile the flight flew over, when it matters
     # which one (the city's blocks); None over the sea.
     surface_tile_extent_m: Optional[float]
-    # The static row-24 surface offset the flight recorded — what a v1 track
-    # (no per-sample surface frame) renders every frame with.
+    # The static surface offset (u.surface_offset) the flight recorded —
+    # what a v1 track (no per-sample surface frame) renders every frame with.
     surface_offset_m: Optional[tuple[float, float]]
-    # Lens water (cloudyview/soar/lens.wgsl): what the flight's switch was.
+    # Lens water (cloudyview/soar/shader/lens.wgsl): what the flight's switch was.
     # A header without the key predates the switch and replays dry, so an
     # old track re-renders exactly as it did.
     lens_water: bool = False

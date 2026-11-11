@@ -32,9 +32,9 @@ export function rhoAirTable(zCoords) {
  * Extinction (m^-1) for one voxel, given mixing ratios in g/kg.
  *
  * Nothing is clamped — negative condensate, which some models write, comes
- * through as negative extinction, and NaN propagates. That is what the
- * desktop does; a browser that quietly cleaned up would disagree with every
- * other renderer in the package.
+ * through as negative extinction, and NaN propagates. That is what
+ * cloudyview/optical_depth.py does; a browser that quietly cleaned up would
+ * disagree with every other renderer in the package.
  */
 export function sigmaAt(lwcGkg, iwcGkg, rhoAir) {
   return (SIGMA_LIQUID_PREFACTOR * lwcGkg + SIGMA_ICE_PREFACTOR * iwcGkg)

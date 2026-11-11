@@ -2,16 +2,11 @@
 // elevated freeways, the street lamps, the parked cars, the skybridges and
 // the warehouse roofs' ridges. citylots.js is the buildings; this is
 // everything the components add that a flight can run into, mirrored from
-// their WGSL (cloudyview/soar/city/components/) the way citylots.js mirrors
+// their WGSL (cloudyview/soar/shader/city/components/) the way citylots.js mirrors
 // city_cell — the same constants by the same names, the same draws in the
 // same order — and held to the renderer by tests/test_city_props_mirror.py,
 // which traces the shader's own city on the GPU and asks this file where
 // each of those rays first meets something.
-//
-// Thomas, 2026-11, of lamp posts, cars, skyways, skybridges and roof ridges
-// passing through the flyer: "it seems like all these should be solid. why
-// not?" They were scenery by a decision of 2026-09-23 (the collider had
-// buildings and nothing else to stand on); this is the reversal.
 //
 // Every solid is a convex polytope (polytope.js).
 //
@@ -66,7 +61,7 @@ export const cc_skyway_CAP_OS = 0.55;
 export const cc_skyway_CROSS_CLEAR = 22.0;
 export const cc_skyway_Z_TOP = 35.1;
 
-/** raymarch.wgsl cc_skyway_swap: the route's local frame (its own inverse). */
+/** components/skyway.wgsl cc_skyway_swap: the route's local frame (its own inverse). */
 const swap = (v, fam) => (fam === 0 ? v : [v[1], v[0], v[2]]);
 
 /** cc_skyway_ztop: the deck's top surface along a route. */
@@ -99,10 +94,10 @@ function localSolid(planes, top, fam, latC) {
  *
  * The two end faces are joints with the next piece of the same deck (or
  * a million metres off), and are not grown by the body's radius: grown, a
- * ramp's end face stood m r + r (sqrt(1 + m^2) - 1) above the flat's grown
- * top, 1.4 cm for the camera — over the collider's 1 cm clearance, so a
- * camera resting on a raised span met a wall at the crest where the road is
- * smooth (loose-ends' review). Ungrown, the pieces' grown tops still meet,
+ * ramp's end face would stand m r + r (sqrt(1 + m^2) - 1) above the flat's
+ * grown top, 1.4 cm for the camera — over the collider's 1 cm clearance, so
+ * a camera resting on a raised span would meet a wall at the crest where the
+ * road is smooth. Ungrown, the pieces' grown tops still meet,
  * within r (sqrt(1 + m^2) - 1), under a third of a millimetre.
  */
 function ribbonSlab(a0, a1, y0, y1, ab, zb, m, h0, h1, top, fam, latC) {
@@ -200,7 +195,7 @@ export function skywaySolids(p0, p1, r, cellM) {
 }
 
 // --- streetlife: the lamp poles and the parked cars --------------------------
-// (components/streetlife.wgsl, on the core's lamp lattice in raymarch.wgsl)
+// (components/streetlife.wgsl, on the core's lamp lattice in city/layout.wgsl)
 //
 // Each of a block's four edges that carries a street has a lamp line, a
 // mast at every station of the street's lattice standing wholly inside the
@@ -252,7 +247,7 @@ const smoothstep = (e0, e1, x) => {
   return t * t * (3.0 - 2.0 * t);
 };
 
-/** raymarch.wgsl city_lamp_inset: the lamp line off centreline k. */
+/** city/layout.wgsl city_lamp_inset: the lamp line off centreline k. */
 function lampInset(k) {
   return CITY_STREET_HALF + (isAvenue(k) ? CITY_AVENUE_EXTRA : 0.0)
     - CITY_LAMP_OFFSET;

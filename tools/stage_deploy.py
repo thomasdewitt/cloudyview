@@ -6,8 +6,7 @@ The site is a fully static Cloudflare R2 bucket, deployed with
     rclone sync . r2-website:personal-website
 
 run from the root of the separate ``personal-website`` repo. Soar lives at
-the site root — ``thomasddewitt.com/soar/`` (moved from
-``/thought-cloud/soar/`` 2026-08-18) — and its canonical URL is already
+the site root — ``thomasddewitt.com/soar/`` — and its canonical URL is already
 baked into ``web/soar/index.html``. So this tool emits exactly one folder,
 ready to be dropped into that repo's working tree:
 

@@ -108,9 +108,9 @@ function thrownMessage(details) {
 }
 
 // The longest one tab.eval may take unless its caller says otherwise. The
-// long async renders run through it (pinned_still's stills, steam_live_qa's
-// and soar_noise's accumulations: seconds to a minute or two), so this is
-// generous; a page wedged mid-render no longer holds a tool forever.
+// long async renders run through it (pinned_still's stills: seconds to a
+// minute or two), so this is generous; a page wedged mid-render still does
+// not hold a tool forever.
 export const EVAL_DEADLINE_MS = 10 * 60 * 1000;
 // How long a goto may take to load.
 export const GOTO_DEADLINE_MS = 2 * 60 * 1000;
@@ -133,7 +133,7 @@ export function withDeadline(promise, ms, what) {
  *     than waiting on a load the error page may or may not fire.
  *   - A same-document navigation (no loaderId: CDP omits it when the
  *     committed document does not change, e.g. a fragment) is done at once:
- *     no load event ever comes for one, and goto used to wait on it forever.
+ *     no load event ever comes for one, and waiting for it would be forever.
  *   - Otherwise the load event, raced against `whenClosed` (the socket
  *     closing) and the deadline.
  */
@@ -179,12 +179,12 @@ function closedError(why) {
  *   - no answer at all by the deadline (a page whose main thread is wedged,
  *     a stuck GPU readback): each evaluate is raced against the time left,
  *     so the wait ends at timeoutMs however long one evaluate would hang.
- * The last two were hangs past any timeout until loose-ends' review.
- * Until 2026-11-09 the poll swallowed all three alike (`.catch(() =>
- * undefined)`), so a failure check inside a waited expression — pinned_
- * still's `if (L.classList.contains("failed") ...) throw new Error(L.
- * innerText)` — could never fire: ?surfacecs=2 showed its failure panel and
- * the tool timed out 181 s later with the reason lost. A waited expression
+ * Without the last two rules those cases hang past any timeout. A poll
+ * that swallowed all three alike (`.catch(() => undefined)`) would make a
+ * failure check inside a waited expression — pinned_still's
+ * `if (L.classList.contains("failed") ...) throw new Error(L.innerText)` —
+ * unable to fire: the page would show its failure panel and the tool time
+ * out minutes later with the reason lost. A waited expression
  * must therefore not throw while merely not ready (use ?. on what may not
  * exist yet); every one in tools/ is written that way.
  */
@@ -284,7 +284,7 @@ export async function openTab(cdpPort) {
     send,
     /** One evaluate, within `timeoutMs` (EVAL_DEADLINE_MS unless the
      *  caller says otherwise): a page wedged mid-evaluate (a stuck GPU
-     *  readback) no longer holds the tool until the socket closes. */
+     *  readback) does not hold the tool until the socket closes. */
     async eval(expression, timeoutMs = EVAL_DEADLINE_MS) {
       const short = expression.length > 80
         ? `${expression.slice(0, 77)}...` : expression;
@@ -307,8 +307,8 @@ export async function openTab(cdpPort) {
     },
   };
   // A tool killed mid-run (a timeout, ^C) must not leave its soar tab
-  // animating in the shared Chrome: an orphan once spoiled every timing
-  // taken outside the GPU lock (2026-09-24).
+  // animating in the shared Chrome: an orphan spoils every timing taken
+  // while it runs.
   const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
   const onSignal = async (s) => {
     await tab.close();

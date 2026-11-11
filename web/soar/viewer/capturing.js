@@ -19,8 +19,8 @@ export const capturing = {
   /**
    * Whether any of the three look settings a capture tier owns is hand-set.
    * When it is, the capture panels select "Custom" by default: the session's
-   * values verbatim, because a named tier is now the PURE preset and would
-   * silently discard exactly what the user just set (Thomas, 2026-09-01).
+   * values verbatim, because a named tier is the PURE preset and would
+   * silently discard exactly what the user just set.
    */
   get _lookIsCustom() {
     return this._byHand.has("haze") || this._byHand.has("lod")
@@ -58,13 +58,12 @@ export const capturing = {
    * name it will be recorded under, the preset that supplies lighting method
    * and spp, and the look — haze, LOD, exposure.
    *
-   * A NAMED tier is the pure parked preset, full stop (Thomas, 2026-09-01):
+   * A NAMED tier is the pure parked preset, full stop:
    * the tier's haze default and its parked LOD — the tier table over clouds,
    * CITY_PARKED_LOD_STRENGTH over the city — with the session's hand-set
-   * values deliberately NOT mixed in. This supersedes the 2026-08-20 "honor
-   * the finer slider" ruling (min(slider, default)): a hand-set look now
-   * selects the Custom tier instead, which carries it verbatim, and a named
-   * tier means the same picture on every machine and every session.
+   * values deliberately NOT mixed in. A hand-set look selects the Custom
+   * tier instead, which carries it verbatim, and a named tier means the
+   * same picture on every machine and every session.
    *
    * `meter` says the exposure is still to be measured: the tier's AE default
    * is on, so _meterCaptureExposure replaces `exposure` with the converged
@@ -109,9 +108,8 @@ export const capturing = {
    * glide, no deadband: nobody watches a capture converge, and for a video a
    * per-frame meter would flicker, so one metered still exposure holds for
    * the whole file. Metered with the CAPTURE's view kwargs (its haze and
-   * LOD change the luminance), against the live renderer state — the meter's
-   * march is the same specialized module whatever the tier, since every
-   * tier shares maxLightSteps. A live meter's readback may still be in
+   * LOD change the luminance), against the live renderer state. A live
+   * meter's readback may still be in
    * flight (one is ever allowed; that is the only null); it always resolves,
    * so wait it out rather than skipping the metering. A meter that fails
    * throws, and fails the capture with it. A meter that saw no light keeps
@@ -380,7 +378,7 @@ export const capturing = {
     return look;
   },
 
-  /** The track as a file, which `soar TRACK.json` renders on the desktop.
+  /** The track as a file, which `soar TRACK.json` renders to video.
    *  Its header describes the video — the video tier's look, metered as
    *  renderTrackVideo meters it — rather than a still of the live view. */
   async downloadTrack(samples, knocks = []) {

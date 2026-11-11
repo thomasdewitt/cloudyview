@@ -1,6 +1,6 @@
 """A capture at a named tier is a parked view at that tier, full stop.
 
-The ruling (Thomas, 2026-09-01): a capture at tier T must march exactly what
+The rule: a capture at tier T must march exactly what
 a parked (held) T view converges to, at the capture's explicit pixel size —
 the tier's haze default, its parked LOD (the city's quarter-pixel floor over
 a city), a once-metered exposure, and the hold ladder's top-rung sampling

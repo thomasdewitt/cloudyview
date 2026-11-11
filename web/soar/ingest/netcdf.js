@@ -8,10 +8,10 @@
 // scale/offset), it is reimplemented here, because h5wasm hands back raw
 // storage.
 //
-// This module used to say it must behave like the desktop tool, quirks
-// included. It no longer does, and the divergence is deliberate rather than
-// drift: this side can ASK — which axis is which, which variable is the
-// condensate, which timestep — and io.py, on a terminal, cannot. So the rules
+// This module does not behave exactly like io.py, and the divergence is
+// deliberate rather than drift: this side can ASK — which axis is which,
+// which variable is the condensate, which timestep — and io.py, on a
+// terminal, cannot. So the rules
 // here are the richer ones, and what the browser resolves is meant to come
 // back out as CLI flags (see viewer.beholdCommand / witnessCommand) rather
 // than be independently re-derived by a weaker copy of this file.
@@ -24,12 +24,10 @@ import { T } from "./strings.js";
 // io.py does it. `qc` really does beat `QC`.
 //
 // `QN`/`qn` are deliberately ABSENT. SAM writes QN for total
-// non-precipitating condensate — cloud water AND cloud ice together (Thomas,
-// 2026-08-22) — so it is not the liquid variable, and inferring it as one
-// renders every ice cloud as water. It was in this list, with a special case
-// bolted alongside to force a question whenever it turned up; the special
-// case is gone and so is the entry, which is the same intent expressed once.
-// A SAM run whose only condensate is QN now fails to infer and asks, with QN
+// non-precipitating condensate — cloud water AND cloud ice together — so it
+// is not the liquid variable, and inferring it as one renders every ice
+// cloud as water. Leaving it out of the list is what forces the question.
+// A SAM run whose only condensate is QN fails to infer and asks, with QN
 // among the variables offered — so it can still be chosen, by someone who
 // knows what their run wrote.
 export const LIQUID_WATER_NAMES = [
@@ -154,11 +152,11 @@ export function listVariables(group) {
 /**
  * Groups holding at least one three-dimensional variable.
  *
- * NOT "groups holding a recognized condensate name", which is what this used
- * to be. That test doubled as the test for whether the file was openable at
- * all, so a file whose variables are named something the lists do not carry
- * was refused before anything could be asked about it. Openability and
- * recognition are now separate questions: this one decides whether there is
+ * NOT "groups holding a recognized condensate name". That test would double
+ * as the test for whether the file is openable at all, so a file whose
+ * variables are named something the lists do not carry would be refused
+ * before anything could be asked about it. Openability and recognition are
+ * separate questions: this one decides whether there is
  * anything here to render, and inference decides whether we know which of it
  * is which.
  */
@@ -321,8 +319,7 @@ export function resolveSpatialDims(dimNames, shape,
     const name = dimNames[i] ?? `dim_${i}`;
     if (isTimeDim(name)) {
       // Dropped from the spatial mapping either way; WHICH step is dropped
-      // to is the caller's question (see describeGroup's `timeDim`). A
-      // multi-step file used to be refused outright here.
+      // to is the caller's question (see describeGroup's `timeDim`).
       dropped.push(i);
       timeDims.push({ axis: i, name, size: shape[i] });
     } else {
@@ -442,7 +439,7 @@ export function resolveSpatialDims(dimNames, shape,
  * has BOTH a same-named placeholder and a real coordinate elsewhere. Taking
  * the placeholder gives three all-zero coordinate arrays, which is a
  * bounding box of zero size, which renders as an empty sky with no ocean in
- * it (Thomas, 2026-08-22).
+ * it.
  */
 export function isPhonyDimensionScale(variable) {
   const name = attrString(variable?.attrs, "NAME");
@@ -481,9 +478,9 @@ function ownDimension(variable) {
  *
  *   1. The dimension's own variable — the CF coordinate-variable convention,
  *      and the strongest signal there is.
- *   2. This axis's candidate names. THIS axis's: the sweep used to run the
- *      x, y and z lists concatenated, which on a cubic grid could hand z the
- *      variable called `x`.
+ *   2. This axis's candidate names. THIS axis's: a sweep over the x, y and
+ *      z lists concatenated could, on a cubic grid, hand z the variable
+ *      called `x`.
  *   3. Any 1-D variable of the right length. Loose, and last.
  *
  * Placeholder dimension scales are excluded throughout — see
@@ -492,8 +489,8 @@ function ownDimension(variable) {
  * Then one override: a first choice that is NOT a length loses to a length
  * further down the list. UM output dimensions its fields by
  * `rholev_eta_rho`, a dimensionless hybrid-height coordinate running 0 to 1,
- * and carries the actual height in `rholev_zsea_rho` — so rule 1 produced a
- * domain 6000 km wide and 0.99 m tall (Thomas, 2026-08-22). A coordinate
+ * and carries the actual height in `rholev_zsea_rho` — so rule 1 alone
+ * produces a domain 6000 km wide and 0.99 m tall. A coordinate
  * that cannot be a distance cannot place a field in space, whatever its name
  * says.
  *
@@ -501,9 +498,9 @@ function ownDimension(variable) {
  * converts; a recognized NON-length (degrees of longitude, pascals, a bare
  * level index — anything UNITS_AXIS knows) is a dead end, because using the
  * numbers anyway renders a plausible-looking box with nonsense proportions:
- * an ICON RCEMIP file with lon/lat in degrees came out 360 m wide and taller
- * than it was deep, which reads on screen as axes swapped (Thomas,
- * 2026-08-31). But a units string this table has never SEEN — "m AGL",
+ * an ICON RCEMIP file with lon/lat in degrees comes out 360 m wide and taller
+ * than it is deep, which reads on screen as axes swapped. But a units string
+ * this table has never SEEN — "m AGL",
  * "meters above sea level" — is not evidence the coordinate is not a length;
  * it is a question, the same shape as the condensate-units one, and the
  * answer arrives as `coordUnits` ("m" or "km") and applies to every
@@ -526,7 +523,7 @@ export function findCoordinate(group, root, dim, axis, coordUnits = null) {
     if (isPhonyDimensionScale(variable)) return;
     // The last-resort sweep must be ASSOCIATED with this axis, not merely the
     // right length: on a cubic grid a stray length-nz variable called `x`
-    // used to become the z coordinate in key order, silently. A dimension
+    // would otherwise become the z coordinate in key order, silently. A dimension
     // scale attached to the axis's own dimension is that association; a
     // variable with none recorded is not adopted here.
     if (rule === "sweep" && ownDimension(variable) !== dim.name) return;
@@ -762,7 +759,7 @@ function attrNumber(attrs, name) {
  * a NaN would reach the GPU texture and bleed through trilinear filtering),
  * while a coordinate has no honest repair and gets refused downstream. The
  * comparison is NaN-aware — a file whose _FillValue attribute is itself NaN
- * used to never match, because `v === NaN` never does.
+ * would otherwise never match, because `v === NaN` never does.
  */
 export function fillMatcher(attrs) {
   const fill = attrNumber(attrs, "_FillValue");
@@ -803,7 +800,7 @@ export function unitsMultiplier(units) {
   // CF's dimensionless "1" says only that the quantity is a ratio, not
   // WHICH ratio — g/kg and kg/kg are both dimensionless. Treated like
   // absent units (a question), not like known ones: counting it as known
-  // used to skip the units panel and then throw here with no way to answer.
+  // would skip the units panel and then throw here with no way to answer.
   if (u === "1") return null;
   if (u === "g/kg") return 1.0;
   if (u === "g/g" || u === "kg/kg") return 1000.0;
@@ -945,8 +942,8 @@ export function describeGroup(root, path, choice = null) {
   // Inference failed and nobody has answered yet. Nothing below this point
   // can be worked out — dimensions, coordinates and units all come off the
   // liquid variable — so the description stops here and says what it needs.
-  // This is the path a file of temperature takes, and it used to be an
-  // error thrown out of h5wasm rather than a question.
+  // This is the path a file of temperature takes: a question, not an
+  // error thrown out of h5wasm.
   if (!liquidVar) {
     return { path, variables, liquidVar: null, iceVar: null,
              needsLiquidChoice: true, needsIceChoice: false,

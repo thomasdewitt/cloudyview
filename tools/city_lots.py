@@ -22,8 +22,8 @@ superblocks served by a street grid of half the density — and its unbuilt
 blocks become YARDS (vacant lots, container and trailer storage, construction
 refuse) where they front development, or OPEN scrub where they do not.
 OPEN land has no streets of its own: the road network is exactly the one
-that serves something (Thomas, 2026-09-23: "regions with no buildings should
-also omit the streets"), and the only roads across open scrub are the
+that serves something (a region with no buildings has no streets), and the
+only roads across open scrub are the
 connectors that join a stranded works to the network (under 1% of open-open
 edges).
 
@@ -92,8 +92,7 @@ TOWER_LOT_H = ((2, 330.0), (3, 900.0), (4, 2000.0))
 # is a tower-lot candidate itself) is a rival, never part of its lot.
 RIVAL_FRAC = 0.5
 # A few dense mid-rise groups merge into one full-block building anyway —
-# the department store, the convention centre — as the old 2x2 superblocks
-# did.
+# the department store, the convention centre — a 2x2 superblock's worth.
 MIDRISE_MERGE_FRAC = 0.06
 MIDRISE_MERGE_RANK = 0.50
 
@@ -214,7 +213,7 @@ def bake_lots(density: np.ndarray, rank: np.ndarray, seed: int = 20260923,
                     # comparable tower of its own keeps it. The tile's
                     # tallest peaks stand on adjacent blocks, and one lot
                     # over them turned the skyline's cluster of needles
-                    # into a single tower (the skyline Thomas loved).
+                    # into a single tower.
                     sub = h0[np.ix_(ys, xs)].copy()
                     sub[oy, ox] = 0.0
                     if np.any(sub >= max(TOWER_LOT_H[0][1],

@@ -17,8 +17,8 @@ So every such call must be VISIBLY in its domain:
 The last is the escape hatch, and the reason is the point: it is what a
 reader checks when the surrounding code changes.
 
-Scans raymarch.wgsl's own code (the GENERATED city block is the component
-files, which are scanned at their source) and the soar web shaders. Needs no
+Scans the shader's files, the city components among them, and the soar web
+shaders. Needs no
 GPU.
 """
 
@@ -229,7 +229,7 @@ def test_the_scanner_catches_the_bug_that_shipped():
     assert not unguarded_calls(
         "fn f() { let d = max(x, 0.0);\n let s = sqrt(d); }")
     # A guard counts only when it IS the argument, not when it starts it,
-    # and only with a bound that keeps it in the domain (loose-ends, c3a50f5).
+    # and only with a bound that keeps it in the domain (c3a50f5).
     for bad in ("sqrt(max(x, 0.0) - 1.0)", "pow(clamp(a, 0.0, 1.0) - 0.5, 2.2)",
                 "sqrt(abs(x) - y)", "sqrt(length(a) - length(b))",
                 "acos(clamp(c, -1.0, 1.0) * 2.0)", "log2(max(x, 0.0))",

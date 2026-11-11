@@ -137,10 +137,11 @@ export const settings = {
    * Held on the viewer as well as on the renderer, because there are windows
    * with no renderer in them: _releaseField nulls it, and the panels that go
    * up during a load — which group? which units? — drive this from the UI on
-   * their way up, which threw and turned a three-group file into "Could not
-   * open this field" (2026-08-14). Remembering it here rather than skipping
-   * the call means the mode survives the gap instead of depending on an
-   * argument about which panels can be open while a field loads.
+   * their way up; without a renderer that call would throw and turn a
+   * three-group file into "Could not open this field". Remembering it here
+   * rather than skipping the call means the mode survives the gap instead of
+   * depending on an argument about which panels can be open while a field
+   * loads.
    */
   setHoldMode(mode) {
     this._holdMode = mode;
@@ -182,12 +183,6 @@ export const settings = {
   },
 
   /**
-   * The Quality panel's tier buttons. Choosing by hand ends the automatic
-   * choice for the session — including on the next field loaded, because
-   * having the app overrule a deliberate choice a minute later is worse than
-   * carrying a stale one.
-   */
-  /**
    * The Quality panel's Auto button: hand the choice back to measurement
    * after a manual pick ended it. Re-runs the startup probe's walk from the
    * floor rather than trusting the hand-picked tier — the probe is the only
@@ -203,6 +198,12 @@ export const settings = {
     this._wake("auto tier");
   },
 
+  /**
+   * The Quality panel's tier buttons. Choosing by hand ends the automatic
+   * choice for the session — including on the next field loaded, because
+   * having the app overrule a deliberate choice a minute later is worse than
+   * carrying a stale one.
+   */
   setQualityTier(tier) {
     this._autoTier = false;
     this._probe = null;

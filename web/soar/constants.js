@@ -1,14 +1,15 @@
 // Every number the look depends on, ported one-for-one from Python.
 //
-// Sources: cloudyview/look.py (shared with witness), cloudyview/soar/engine.py,
-// cloudyview/soar/menu.py, cloudyview/soar/app.py, cloudyview/config.py.
-// A value that drifts from its Python twin silently changes the picture, so
-// tests/test_web_uniform_parity.py runs this file under node and diffs the
-// packed uniform block against engine.write_uniforms. Change one, change both.
+// Sources: cloudyview/soar/look.py (shared with witness),
+// cloudyview/soar/uniforms.py, cloudyview/soar/surfaces.py and
+// cloudyview/soar/tiers.py. A value that drifts from its Python twin silently
+// changes the picture, so tests/test_uniform_parity.py runs this file under
+// node and diffs the packed uniform block against pack_uniforms. Change one,
+// change both.
 
 "use strict";
 
-// --- look.py: the witness realism package -------------------------------
+// --- soar/look.py: the witness realism package --------------------------
 
 export const SUN_COLOR = [20.2, 21.0, 22.4];
 export const LEGACY_AMBIENT = [0.18, 0.225, 0.33];
@@ -36,7 +37,7 @@ export const AERIAL_SCALE_HEIGHT_M = 2500.0;
 // 2.5 km scale height an upward ray leaves the haze without ever reaching the
 // cutoff optical depth, so nothing bounds its march but the range ceiling.
 // Uniform haze is unphysical and caps every ray at one distance — the
-// cheapest range lever there is. Mirrors soar_host.ViewState.
+// cheapest range lever there is. Mirrors soar/uniforms.py ViewState.
 export const DEFAULT_HAZE_HEIGHT_DEPENDENT = false;
 
 export const OCEAN_HAZE_EXTINCTION_PER_KM = 0.012;
@@ -59,25 +60,23 @@ export const HAZE_MAX_E_FOLDING_KM = 200.0;
 
 // Haze is also the cheapest performance lever there is, which is why the
 // lower tiers ask for more of it. In a periodic domain the view march ends
-// where the clear-air transmittance runs out (periodic_march_cap in
-// raymarch.wgsl), so thicker air is literally a shorter ray: at haze 1 the
+// where the clear-air transmittance runs out (periodic_march_cap in the
+// shader), so thicker air is literally a shorter ray: at haze 1 the
 // sea-level e-folding length is 9.0 km, at haze 2 it is 3.5 km, and the cap
 // moves in proportion. A tier that cannot afford the distance buys the
 // atmosphere that hides it.
 //
-// The cost of this: tiers no longer converge to the same picture, which the
-// hold ladder was built to guarantee. That guarantee is now the Still mode's
-// (see DEFAULT_HOLD_MODE) rather than the app's, and two machines that
-// auto-pick different tiers will show different weather. Thomas asked for it
-// with that trade named (2026-08-14). A hand-set haze is never overridden in
-// FLIGHT — no tier change moves it. A capture at a named tier is the pure
-// preset and takes this table's value regardless; a hand-set haze rides into
-// a capture only through the capture panels' "Custom" tier (2026-09-01).
+// The cost of this: tiers do not converge to the same picture. Convergence
+// across tiers is the Still mode's guarantee (see DEFAULT_HOLD_MODE) rather
+// than the app's, and two machines that auto-pick different tiers will show
+// different weather; that trade is deliberate. A hand-set haze is never
+// overridden in FLIGHT — no tier change moves it. A capture at a named tier
+// is the pure preset and takes this table's value regardless; a hand-set
+// haze rides into a capture only through the capture panels' "Custom" tier.
 // Values are the aerosol coordinate whose sea-level e-folding length is the
 // named distance (hazeFromEFoldingKm in spectral.js — not imported here,
-// that would be circular). Retuned 2026-08-18 to Thomas's hand-set panel
-// values, much clearer across the board; max mirrors high because whatever
-// else max buys, it must never be hazier.
+// that would be circular). The values were set by hand in the panel; max
+// mirrors high because whatever else max buys, it must never be hazier.
 export const DEFAULT_HAZE_BY_TIER = {
   max: -0.0380,      // 70 km
   high: -0.0380,     // 70 km
@@ -86,7 +85,7 @@ export const DEFAULT_HAZE_BY_TIER = {
   minimal: 1.0905,   // 8 km
 };
 
-// --- engine.py defaults -------------------------------------------------
+// --- scene defaults -----------------------------------------------------
 
 export const DEFAULT_SUN_AZIMUTH = 20.0;
 export const DEFAULT_SUN_ELEVATION = 55.0;
@@ -94,8 +93,7 @@ export const DEFAULT_SUN_ELEVATION = 55.0;
 // The lowest sun flight will OPEN at, in degrees above the horizon -- a
 // zenith of 60. It is a performance floor, not a look: a sun a few degrees
 // up makes every ray march the long way through the haze, and a demo lit
-// that way opens slow enough to feel broken on modest hardware (Thomas,
-// 2026-09-01: "sunsets are much slower to fly").
+// that way opens slow enough to feel broken on modest hardware.
 //
 // It clamps only the STARTING sun, and only upward. A demo's own `sun` is
 // still the light its still was made under and still what the card shows;
@@ -103,21 +101,20 @@ export const DEFAULT_SUN_ELEVATION = 55.0;
 // flyer can drag straight back down. Azimuth is untouched -- elevation is
 // the only thing that costs.
 //
-// As of 2026-09-01 this binds on exactly two demos, both sunsets at 4.5
-// degrees: STEAM stratified cirrus and the coarse marine congestus. The
-// nearest case it does not touch is DYCOMS at 30.5.
+// It binds on the sunset demos (STEAM stratified cirrus and the coarse marine
+// congestus are at 4.5 degrees); DYCOMS, at 30.5, is just clear of it.
 export const MIN_START_SUN_ELEVATION = 30.0;
 export const DEFAULT_EXPOSURE = 4.0;
 export const DEFAULT_AMBIENT_STRENGTH = 0.15;
-// NB: config.py's witness block carries a different (brighter) ocean
-// reflectance. soar uses this one — do not cross the wires.
+// Twin of soar/uniforms.py DEFAULT_OCEAN_REFLECTANCE; behold's sea uses the
+// same values.
 export const DEFAULT_OCEAN_REFLECTANCE = [0.0020, 0.0045, 0.0126];
 
-// The night city's five spectral rows (soar_host NIGHT_*). Fixed values, not
-// the daytime air-mass pipeline: the "sun" is a moon and the sky is dark —
-// there is no elevation-dependent spectrum to compute. Twins of
-// soar_host.py's NIGHT_MOON_CLOUD_COLOR..NIGHT_MOON_DISC; the uniform
-// parity test pins the two lists to each other.
+// The night city's five spectral rows. Fixed values, not the daytime
+// air-mass pipeline: the "sun" is a moon and the sky is dark — there is no
+// elevation-dependent spectrum to compute. Twins of soar/uniforms.py's
+// NIGHT_MOON_CLOUD_COLOR..NIGHT_MOON_DISC; the uniform parity test pins the
+// two lists to each other.
 export const NIGHT_MOON_CLOUD_COLOR = [0.34, 0.42, 0.60];
 export const NIGHT_AMBIENT_TINT = [0.020, 0.026, 0.044];
 export const NIGHT_SKY_HORIZON = [0.012, 0.014, 0.022];
@@ -131,8 +128,7 @@ export const NIGHT_MOON_DISC = [4.0, 4.2, 4.6];
 //
 // The offset lands the tile's megatower district — its wildest cascade
 // excursion, and the part of the city worth arriving over — near the middle of
-// the domain, which is the same choice soar_host's harness default makes for
-// the field the harness flies. Whole blocks (90 m), so the street grid meets
+// the domain. Whole blocks (90 m), so the street grid meets
 // the domain edge where a street would be anyway.
 export const CITY_TILE_OFFSET_M = [8100.0, -44190.0];
 
@@ -142,7 +138,7 @@ export const CITY_TILE_OFFSET_M = [8100.0, -44190.0];
 // would raise a different, wrong city without a single error. The schema also
 // versions the tile's bin URLs (scene.js loadOceanTile), so a bump reaches
 // every visitor past any cache. Pinned against the tiles and against
-// soar_host.SURFACE_TILE_SCHEMAS by tests/test_city_lots.py.
+// soar/surfaces.py SURFACE_TILE_SCHEMAS by tests/test_city_lots.py.
 export const SURFACE_TILE_SCHEMAS = {
   ocean: "cloudyview.web.ocean.v2",
   city: "cloudyview.web.city.v2",
@@ -153,21 +149,19 @@ export const SURFACE_TILE_SCHEMAS = {
 // 102.4 m, so the fold is invisible, and a long frame is what a recorded
 // track can carry between two samples — the resamplers unwrap sx/sy at half
 // the period, 819 m here rather than 51 m at one tile, where a flight at
-// 1500 m/s recorded at 20 fps (75 m a sample) slid the sea. It is also the
-// moving sea's period (2026-09-23..25), so its tracks replay as recorded.
-// Pinned against soar_host.SURFACE_FRAME_TILES by
+// 1500 m/s recorded at 20 fps (75 m a sample) would slide the sea. It is
+// also the period tracks recorded over a moving sea carry, so they replay as
+// recorded. Pinned against soar/surfaces.py SURFACE_FRAME_TILES by
 // tests/test_surface_tile_loader.py.
 export const SURFACE_FRAME_TILES = { ocean: 16, city: 1 };
-// From the 2026-08-22 12:31 capture, the same still the start camera and the
-// landing backdrop come from: the moon the view was composed under is part
-// of the view.
+// From the same still the start camera and the landing backdrop come from:
+// the moon the view was composed under is part of the view.
 export const CITY_MOON = { azimuth: 181.0, elevation: 20.0 };
 
 // Where a cyberpunk flight opens: down in the streets, looking north-west
-// along a canyon with the moon off the right shoulder — Thomas flew to it and
-// took a still there (the capture of 2026-08-22 12:31, whose metadata these
-// six numbers are), and the landing page's cyberpunk backdrop is the same
-// view rendered offline.
+// along a canyon with the moon off the right shoulder. These six numbers are
+// the metadata of a still captured there, and the landing page's cyberpunk
+// backdrop is the same view rendered offline.
 //
 // The mode's, not the demo's: a borrowed demo carries the camera ITS landing
 // still was taken from, which is a daylight aerial over cloud tops, and
@@ -177,8 +171,8 @@ export const CITY_MOON = { azimuth: 181.0, elevation: 20.0 };
 // the CLOUD box, so the same triple lands in a different district under
 // every differently-sized field — and worse, wrapping it into [-1, 1] moves
 // the camera by a cloud period, which leaves the clouds identical and
-// shifts the CITY by a fifth of a tile. That wrap is exactly how the spawn
-// drifted a domain-width off the backdrop's street. scene.js converts this
+// shifts the CITY by a fifth of a tile, a domain-width off the backdrop's
+// street. scene.js converts this
 // to the loaded field's relative frame at build time.
 export const CITY_START_CAMERA = {
   positionCityM: [17393.0, 61646.0, 309.0],
@@ -190,9 +184,9 @@ export const CITY_START_CAMERA = {
 // Where the first-flight tutorial puts a cyberpunk visitor. The tutorial
 // wants a LOW start (viewer.tutorialSpawn: turning the mouse should swing
 // the world past), which over the sea is the water line and in the city,
-// taken straight down from CITY_START_CAMERA, was a spot 23 m off the street
-// facing a building's flank — a first sight of a dark wall. This is the same
-// street's centre line, 60 m up, looking down its canyon: lit towers on both
+// taken straight down from CITY_START_CAMERA, would be a spot 23 m off the
+// street facing a building's flank — a first sight of a dark wall. This is
+// the same street's centre line, 60 m up, looking down its canyon: lit towers on both
 // sides and the facades close enough to show their relief. City frame, like
 // CITY_START_CAMERA.
 export const CITY_TUTORIAL_CAMERA = {
@@ -201,7 +195,7 @@ export const CITY_TUTORIAL_CAMERA = {
   elevation: 8.0,
 };
 
-// Flight speed a cyberpunk session opens at, m/s (Thomas, 2026-08-22). The
+// Flight speed a cyberpunk session opens at, m/s. The
 // day default is 1500 m/s, which is a speed for crossing a 50 km cloud field
 // and is a blur between two buildings 20 m apart. The wheel still reaches
 // anything SPEED_LIMITS allows; this is only where the session starts, and
@@ -218,11 +212,10 @@ export const STEP_VOXEL_FACTOR = 2.0;
 export const APP_LIGHT_MARCH_LOD_DEGREES = 1.4;
 export const APP_VIEW_STEP_LOD_DEGREES = 0.6;
 
-// Tone-map gamma. 1.4 is witness's reference; 3.08 is what the desktop
-// window accidentally showed for years (sRGB swapchain double-encode).
-// The default is 1.66 — the value Thomas flies and the one every
-// 2026-08-11 look constant was tuned against a real photo at; the look
-// and the encode are a matched pair now.
+// Tone-map gamma. 1.4 is witness's reference; 3.08 is what an sRGB
+// swapchain's double encode shows.
+// The default is 1.66 — the gamma the look constants were tuned against a
+// real photo at; the look and the encode are a matched pair.
 export const TONE_MAP_GAMMA_WITNESS = 1.4;
 export const TONE_MAP_GAMMA_AS_FLOWN = 3.08;
 export const DEFAULT_TONE_MAP_GAMMA = 1.66;
@@ -230,15 +223,14 @@ export const TONE_MAP_GAMMA_LIMITS = [1.0, 4.0];
 
 // The extended-Reinhard white point: the exposed radiance that maps to 1.0,
 // and so what decides whether a sunlit face is white or a bright grey it
-// cannot escape. A shader const until it became the second knob worth
-// reaching for after gamma. Default 15.0 — the tuned value, so nothing moves
-// unless the slider does. Below 4 the picture clips; above 40 the shoulder
+// cannot escape: the second knob worth reaching for after gamma. Default
+// 15.0 — the tuned value. Below 4 the picture clips; above 40 the shoulder
 // is so close to linear that the slider stops doing anything.
 export const DEFAULT_TONE_MAP_WHITE_POINT = 15.0;
 export const TONE_MAP_WHITE_POINT_LIMITS = [4.0, 40.0];
 
 // Display-space contrast about mid-grey, after the gamma encode. 1.0 is
-// exactly the identity — see raymarch.wgsl's tone_map for why that is written
+// exactly the identity — see tonemap.wgsl's tone_map for why that is written
 // as a multiply-add. Past 1.6 the sky posterizes and the shadows block up;
 // below 0.5 the picture is fog.
 export const DEFAULT_CONTRAST = 1.0;
@@ -246,7 +238,7 @@ export const CONTRAST_LIMITS = [0.5, 1.6];
 
 // --- auto exposure --------------------------------------------------------
 //
-// The camera-side half of the 2026-08-14 forward-scattering change. The
+// The camera-side half of the forward-scattering lighting. The
 // diffraction spike puts thin cloud near the sun orders of magnitude above a
 // diffusely-lit base in linear radiance — which is physically right, and
 // useless under a fixed exposure, because the tone map clamps the veils to
@@ -266,7 +258,7 @@ export const CONTRAST_LIMITS = [0.5, 1.6];
 // that leaves every no-sun-in-frame view at exactly the shipped look and
 // stops the toward-sun / low-sun frames to ~1, which is where the dark
 // bottoms come from.
-// Auto is a per-tier default (Thomas, 2026-08-14): on everywhere the meter
+// Auto is a per-tier default: on everywhere the meter
 // is affordable — which measurement says is everywhere but Minimal, where
 // the frame budget is so tight that even the glide's accumulation restarts
 // hurt. The meter itself is ~0.1-0.5% of a frame's rays. A hand-touched
@@ -277,10 +269,10 @@ export const AUTO_EXPOSURE_DEFAULT_BY_TIER = {
 // Metered on a tiny linear render (TONE_MAP compiled out) of the live view:
 // about 2304 rays per meter (64x36 at 16:9), beneath measurement next to a
 // frame's march. The grid takes the window's shape (uniforms.js meterSize):
-// a fixed 64x36 had square pixels only at 16:9, and in a portrait window
-// each meter pixel was ~3x taller than wide.
+// a fixed 64x36 would have square pixels only at 16:9, and in a portrait
+// window each meter pixel would be ~3x taller than wide.
 export const AUTO_EXPOSURE_METER_RAYS = 64 * 36;
-// Every frame: the 200 ms first cut stepped visibly (Thomas). The real
+// Every frame: a 200 ms interval steps visibly. The real
 // cadence is set by the readback round-trip — one meter is in flight at a
 // time — and the glide's time constant is computed from measured elapsed
 // time, so the feel is frame-rate independent.
@@ -294,8 +286,8 @@ export const AUTO_EXPOSURE_PERCENTILE = 0.99;
 // relative to the white point, at full response.
 export const AUTO_EXPOSURE_HIGHLIGHT_FRACTION = 0.90;
 // Response strength: the fraction of the log-distance below the ceiling the
-// controller actually applies. Full protection (1.0) put the toward-sun
-// STEAM frame 8x down and read as too dark (Thomas, 2026-08-14) — a real
+// controller actually applies. Full protection (1.0) puts the toward-sun
+// STEAM frame 8x down, which reads as too dark — a real
 // camera lets the region around the sun clip rather than crush the scene.
 // At 0.5 that frame stops ~3.5x down and a mild highlight barely moves.
 export const AUTO_EXPOSURE_RESPONSE = 0.5;
@@ -319,9 +311,8 @@ export const DEFAULT_MOTION_BLEND_REFERENCE_FPS = 60.0;
 //
 // The accumulator blends each new march into the picture with weight alpha,
 // so alpha is the INVERSE of smoothing: 0.9 keeps almost nothing of the last
-// frame, 0.15 keeps most of it. The slider used to show alpha under the label
-// "Motion smoothing", so turning it up smoothed less (Thomas, 2026-08-14).
-// It now shows smoothing itself, on [0, 1], and this is where the two meet.
+// frame, 0.15 keeps most of it. The slider shows smoothing itself, on [0, 1],
+// so that turning it up smooths more, and this is where the two meet.
 //
 // The floor is per tier because smoothing is worth more the slower the
 // machine: it is the one setting that makes a low frame rate read as motion
@@ -332,7 +323,7 @@ export const MOTION_ALPHA_AT_ZERO_SMOOTHING = 0.90;
 export const MOTION_ALPHA_FLOOR_BY_TIER = {
   max: 0.30, high: 0.30, medium: 0.24, low: 0.20, minimal: 0.15,
 };
-// Retuned 2026-08-18 to Thomas's hand-set panel values. Medium smooths LESS
+// Values set by hand in the panel. Medium smooths LESS
 // than high on purpose: medium flies at a lower render scale, and smoothing
 // stacked on upscale blur reads as smear.
 export const DEFAULT_MOTION_SMOOTHING_BY_TIER = {
@@ -369,10 +360,10 @@ export function motionSmoothingForAlpha(alpha, tier) {
 // grain of the look instead of against it. Past ~2.5 the far field starts to
 // band on high-contrast tops, which is why the slider stops where it does.
 // High and max fly at 0.5 — half the angular step, so the far field is
-// marched twice as finely as the tuned constants alone would ask for
-// (Thomas, 2026-08-15). The two tiers are equal here on purpose: whatever
+// marched twice as finely as the tuned constants alone would ask for.
+// The two tiers are equal here on purpose: whatever
 // else max buys, it must never march more coarsely than high.
-// Lower tiers retuned 2026-08-18 (Thomas's hand-set values). Minimal's
+// The lower tiers' values were set by hand in the panel. Minimal's
 // default sits ON the slider ceiling: coarser is off the table there,
 // finer is the only direction that changes anything.
 export const DEFAULT_LOD_STRENGTH_BY_TIER = {
@@ -394,14 +385,13 @@ export const DEFAULT_LOD_STRENGTH_BY_TIER = {
 // the slider floor, which under the packer's quarter-pixel clamp MEANS "march
 // at a quarter of the pixel angle" rather than any particular small number,
 // so it is resolution-independent rather than an extreme constant (e99cf3e,
-// 471b5bf). High joins max there (Thomas, 2026-08-22) because high is the
+// 471b5bf). High joins max there because high is the
 // tier the auto ladder actually settles on — QUALITY_TIERS_CHEAPEST_FIRST
 // tops out at it — so a city that only looks right at max looks right for
 // nobody. The rest step by a factor of ~3 down to minimal at 0.5, which is
 // the DAY default: the city's coarsest is the cloud scene's normal.
 //
-// These are the FLIGHT numbers only (2026-09-01; they were briefly the
-// capture numbers too). A parked city view and a city capture march at
+// These are the FLIGHT numbers only. A parked city view and a city capture march at
 // CITY_PARKED_LOD_STRENGTH below — nobody is holding a framerate there, and
 // the whole point of parking in a street is that the windows resolve.
 export const CITY_LOD_STRENGTH_BY_TIER = {
@@ -419,12 +409,11 @@ export const CITY_LOD_STRENGTH_BY_TIER = {
 // user's, moving or parked.
 export const CITY_PARKED_LOD_STRENGTH = 0.01;
 
-// The night city's roof clutter by quality tier (Thomas, 2026-11-09: "Maybe
-// more for high tier where we can afford it and less for low and minimal?
-// More on med too."): a factor on rooftopworks' clutter families' slot
+// The night city's roof clutter by quality tier, more where the tier can
+// afford it: a factor on rooftopworks' clutter families' slot
 // probabilities (tanks, condensers, vents, pipe runs, packaged units; never
 // the stair or the skylights), u.roof_density. 1 is the density the roofs were
-// tuned at. Twin of cloudyview/soar_host.py CITY_ROOF_DENSITY_BY_TIER
+// tuned at. Twin of cloudyview/soar/tiers.py CITY_ROOF_DENSITY_BY_TIER
 // (tests/test_uniform_parity.py pins them).
 export const CITY_ROOF_DENSITY_BY_TIER = {
   max: 1.4, high: 1.4, medium: 1.2, low: 0.7, minimal: 0.5,
@@ -441,23 +430,23 @@ export function lodStrengthByTier(city) {
 
 // The floor is below the default rather than equal to it: a slider whose
 // default sits on its own end stop cannot be used to ask for anything finer,
-// and finer is only ever slower — never wrong. Floor lowered 0.25 -> 0.01
-// for the night city: the bottom of the slider is the packer's quarter-pixel
+// and finer is only ever slower — never wrong. The floor of 0.01 is for the
+// night city: the bottom of the slider is the packer's quarter-pixel
 // clamp at any fov and resolution, so it is a reachable "as fine as the
 // image can show" rather than a number. The day tiers do not move onto it —
 // only the city's max asks for it — but the slider is one control and a
 // research pilot over clouds may still drag it down.
 export const LOD_STRENGTH_LIMITS = [0.01, 3.0];
 
-// witness's default and the uniform block's own default. Captures no longer
-// read it (2026-09-01): a capture at tier T takes T's own parked look —
+// witness's default and the uniform block's own default. Captures do not
+// read it: a capture at tier T takes T's own parked look —
 // DEFAULT_LOD_STRENGTH_BY_TIER[T] over clouds, CITY_PARKED_LOD_STRENGTH over
 // the city — so what a still marches is what a parked T view marches.
 //
-// Mirrors soar_host.DEFAULT_LOD_STRENGTH, and tests/test_uniform_parity.py
-// compares the two hosts' defaults directly — it caught them disagreeing the
-// moment the Python side moved, which is the whole reason this is one named
-// constant rather than a 0.5 written into three call sites.
+// Mirrors soar/uniforms.py DEFAULT_LOD_STRENGTH, and
+// tests/test_uniform_parity.py compares the two hosts' defaults directly,
+// which is why this is one named constant rather than a 0.5 written into
+// three call sites.
 export const DEFAULT_LOD_STRENGTH = 0.5;
 export const DEFAULT_MOTION_JITTER_SCALE = 0.65;
 export const DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0;
@@ -466,15 +455,12 @@ export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
 // Rows of four floats in the uniform block; shader/uniforms.wgsl declares
 // what each holds.
 export const UNIFORM_ROWS = 21;
-// DERIVED, never written out. These were two independent literals until a row
-// was added and only one of them moved: the packer produced 384 bytes, the
-// buffer stayed 368, and every draw failed validation with a black screen.
-// One of them is a fact about the block and the other was a copy of it. Kept
-// derived after that row was reverted, because the bug was never about the
-// row — it was about the copy.
+// DERIVED, never written out: as two independent literals, a row added to
+// one and not the other makes the packer and the buffer disagree, and every
+// draw fails validation with a black screen.
 export const UNIFORM_NBYTES = UNIFORM_ROWS * 16;
 
-// --- the sun-tau cache (prototype, 2026-08-19) ----------------------------
+// --- the light cache --------------------------------------------------------
 //
 // Linear reduction of the cache grid against the volume grid. 2 costs an
 // eighth of the texels (and an eighth of full-res bake time and memory) and
@@ -506,21 +492,20 @@ export const LIGHT_CACHE_BAKE_SLICES_PER_FRAME = 8;
 //     light step 8x coarser   1.86x faster   RMSE 0.022
 //
 // The light march is about a third of the frame, and coarsening it costs
-// almost nothing visually until 8x. Lowering `maxLightSteps` — the old way of
-// making the light march cheap — buys a similar amount but TRUNCATES the
-// integration rather than coarsening it, so at a low sun the ray runs out of
-// steps before it leaves the cloud and the tier brightens in a way that
-// depends on the viewing direction. A coarse step integrates the whole path;
-// a low cap integrates part of it and stops. So the cap is now a safety
-// ceiling (the shader's MAX_LIGHT_STEPS) for every tier, and the light march is
-// made cheap by its step instead.
+// almost nothing visually until 8x. Capping the light march's step count
+// would buy a similar amount but TRUNCATES the integration rather than
+// coarsening it, so at a low sun the ray runs out of steps before it leaves
+// the cloud and the tier brightens in a way that depends on the viewing
+// direction. A coarse step integrates the whole path; a low cap integrates
+// part of it and stops. So the cap is a safety ceiling (the shader's
+// MAX_LIGHT_STEPS) for every tier, and the light march is made cheap by its
+// step instead.
 //
-// Holding the cap equal across tiers has a second effect worth as much as the
-// first: it is what the shader is textually specialized on (see
-// specializeShader), so one value means ONE raymarch.wgsl module for the whole
-// session. Switching tiers — which the startup probe does several times in its
-// first half second, and the quality panel does on a click — no longer
-// compiles anything, so there is no stall to hide.
+// The step is a uniform, so it costs no compile. The shader is specialized
+// on the lighting method alone (see specializeShader), and every tier but
+// Max shares one module: switching among them — which the startup probe does
+// several times in its first half second, and the quality panel does on a
+// click — compiles nothing, so there is no stall to hide.
 //
 // The lower tiers therefore do not look like High, on purpose. They are
 // allowed to: their job is to be much faster while the camera moves, and the
@@ -557,9 +542,8 @@ export const QUALITY_PRESETS = {
   // Minimal flies at an eighth, not a quarter. A quarter was chosen against a
   // 5080; a GPU sixty times slower renders minimal's own frame in ~30 ms, and
   // an eighth is four times fewer pixels than a quarter, which brings that
-  // back inside a vsync. Plain "Minimal", not the old "smooth stills, rough
-  // flight" tag — the name is user-facing in the startup toast on exactly the
-  // machines it used to insult as "Potato".
+  // back inside a vsync. The name is plain "Minimal" because it is user-facing
+  // in the startup toast, on exactly the machines a jokier name would insult.
   minimal: { name: "minimal", label: "Minimal",
             renderScale: 0.125, stepFactor: 4.0, lightStepFactor: 12.0,
             sppPerFrame: 1,
@@ -567,11 +551,11 @@ export const QUALITY_PRESETS = {
 };
 export const QUALITY_TIER_NAMES = ["max", "high", "medium", "low", "minimal"];
 // The surface stages each traced surface runs before the march, in order:
-// raymarch.wgsl fragment entries, each after the first reading the one
-// before, the last writing the surface the march reads. The city: its
-// boxes, the facade shell (fs_surface_refine), the street
-// (fs_surface_street). soar_host.SURFACE_STAGES is the Python twin (pinned by tests/test_surface_stages.py); renderer.js derives
-// the rest from it.
+// shader fragment entries, each after the first reading the one before, the
+// last writing the surface the march reads. The city: its boxes, the facade
+// shell (fs_surface_refine), the street (fs_surface_street).
+// soar/surfaces.py SURFACE_STAGES is the Python twin (pinned by
+// tests/test_surface_stages.py); renderer.js derives the rest from it.
 export const SURFACE_STAGES = {
   city: ["fs_surface", "fs_surface_refine", "fs_surface_street"],
 };
@@ -588,7 +572,7 @@ export const QUALITY_TIERS_CHEAPEST_FIRST = ["minimal", "low", "medium", "high"]
 // starting tier before Renderer.init compiles anything); this is the answer
 // when there is no measurement, which is what the offline capture paths want.
 export const DEFAULT_QUALITY_TIER = "high";
-// The floor was 0.25 until minimal's flight scale went below it. Only two
+// The floor is minimal's flight scale. Only two
 // things read it: renderTargetSize's validation, and the Quality panel's
 // slider bounds (whose step is 0.025 so that both ends stay reachable). The
 // capture paths never see it — they force 1.0.
@@ -615,15 +599,14 @@ export const RENDER_SCALE_SLIDER_STEP = 0.025;
 // The top rung SAMPLES like High for every tier without exception — the tier
 // governs flight, and a parked picture is stepped and lit the same wherever
 // you flew in from. Its SCALE is capped per tier (0.5 on Minimal, 0.75 on
-// Low), which is new and is a real retreat from "every tier converges to the
-// same still": those two settle to a picture that is upscaled, not native.
+// Low), so not every tier converges to the same still: those two settle to
+// a picture that is upscaled, not native.
 //
 // The reason is the upscale itself. Minimal flying at 0.125 and holding at
 // 1.0 is a 64x jump in pixels for one frame, and on the hardware that picks
 // Minimal that frame is most of a second — which is what the view then has to
-// be flown out of (Thomas, on the Mac: "much of the feel of slowness might be
-// caused by the still frame upscaling"). 0.5 is 16x, lands inside
-// HOLD_MAX_FRAME_MS on that hardware instead of being capped by it, and is
+// be flown out of, and it reads as the whole app being slow. 0.5 is 16x,
+// lands inside HOLD_MAX_FRAME_MS on that hardware instead of being capped by it, and is
 // four times the detail it flew at. The difference between a 0.5 upscale and
 // a native still is far smaller than the difference between a settled picture
 // and one that never arrives.
@@ -631,14 +614,11 @@ export const RENDER_SCALE_SLIDER_STEP = 0.025;
 // Intermediate rungs keep the flight tier's sampling because they are meant to
 // be cheap stepping stones: their job is to put something settled on screen
 // while the expensive rung is still being paid for, not to be the answer.
-// (Before the light-step rework this rule also avoided a mid-hold shader
-// compile. That reason is gone — every tier now specializes identically — but
-// the rule earns its keep on cost alone.)
 // The stepping stones only. The TOP rung is not listed here — it is the
-// hold render scale below, sampled like High, which the Quality panel now
+// hold render scale below, sampled like High, which the Quality panel
 // exposes as its own slider next to the flight one. Splitting the two is
 // what lets "how sharp it gets when I stop" be a number the user sets rather
-// than a table entry they cannot see (Thomas, 2026-08-14).
+// than a table entry they cannot see.
 export const QUALITY_HOLD_RUNGS = {
   max:    [],
   high:   [],
@@ -661,7 +641,7 @@ export const HOLD_RUNG_FRAMES = 4;
 // Above this altitude no steam can be in view, so a parked city view may
 // sleep again: the steam stands below cc_manholesteam_ZTOP (15 m) and is
 // marched only to cc_manholesteam_RANGE (360 m) along the ray
-// (raymarch.wgsl's manholesteam component; tests/test_live_steam.py pins
+// (city/components/manholesteam.wgsl; tests/test_live_steam.py pins
 // the sum). Below it the live view's steam keeps the loop awake, parked or
 // paused (Renderer.drawFrame's liveSteam).
 export const LIVE_STEAM_CEILING_M = 375.0;
@@ -669,9 +649,9 @@ export const LIVE_STEAM_CEILING_M = 375.0;
 // The tiers that draw the city's steam live (Renderer.liveSteamActive):
 // Medium and up. Low and Minimal march it into the picture as every still
 // does, at a clock that stops while parked, so there the steam pauses with
-// the flight and a parked view converges and sleeps — Thomas (2026-11-09),
-// on its ~0.15 ms a frame: "Maybe turn it off for low though?"; the two
-// tiers that cut the most to hold a frame rate keep the cheaper path.
+// the flight and a parked view converges and sleeps: the live steam costs
+// ~0.15 ms a frame, and the two tiers that cut the most to hold a frame rate
+// keep the cheaper path.
 export const LIVE_STEAM_TIERS = Object.freeze(["max", "high", "medium"]);
 
 // The ceiling on a single held frame, and the reason the climb is gated by a
@@ -691,14 +671,13 @@ export const LIVE_STEAM_TIERS = Object.freeze(["max", "high", "medium"]);
 export const HOLD_MAX_FRAME_MS = 400.0;
 
 // The sample count a held view settles at — PARKED_ACCUM_FRAMES_BY_TIER — is
-// defined under "capture" below, next to the capture count it used to be.
+// defined under "capture" below, because a capture's count is the same table.
 
 // --- the startup auto-tier probe -----------------------------------------
 //
-// What the probe is aiming at: 30 fps flight (Thomas, 2026-08-20: "30fps is
-// not bad" — was 40, and before that a 60 Hz vsync; each step down lets the
-// measurement pick the tier a human actually finds flyable rather than one
-// conservatively below it). AUTO_TIER_MARGIN below still applies on top,
+// What the probe is aiming at: 30 fps flight, which is flyable; a stricter
+// target would pick a tier conservatively below the one a human finds
+// flyable. AUTO_TIER_MARGIN below still applies on top,
 // and the governor's hold threshold derives from this too.
 export const AUTO_TIER_TARGET_MS = 1000.0 / 30.0;
 // The escalation rule, and the safety property that hangs off it.
@@ -719,8 +698,7 @@ export const AUTO_TIER_TARGET_MS = 1000.0 / 30.0;
 //
 // The ratios are measured, not guessed. RTX 5080, 2560x1440 output, TWPICE
 // 256^3, two views (a thick one and an overview), at the tier configurations
-// defined above. Re-measured 2026-08-14 when the flight scales moved
-// (benchmarking/soar_frame_bench.py --output 2560x1440):
+// defined above (tools/soar_bench.py --output 2560x1440):
 //
 //     high     7.48 / 5.32 ms
 //     medium   2.52 / 2.35     -> high:   2.98x / 2.27x
@@ -739,8 +717,8 @@ export const AUTO_TIER_TARGET_MS = 1000.0 / 30.0;
 // driver-side, so it does NOT shrink on a slower GPU, where the true ratio is
 // nearer the work ratio: 5.8x the pixels times a finer step, call it 7x.
 // Taking the measured 2 at face value would let a weak machine escalate on
-// the strength of a number that describes this one. 4.0 is the old 4.5 nudged
-// by the new scales rather than by the new measurement, deliberately.
+// the strength of a number that describes this one. 4.0 is chosen from the
+// scales rather than from the measurement, deliberately.
 //
 // That weakness is bounded by the ordering rule rather than by these numbers:
 // being one rung too optimistic costs a settle point that is sluggish, not a
@@ -784,8 +762,8 @@ export const AUTO_TIER_SAMPLE_FRAMES = 3;
 // and on Firefox it does not: its WebGPU resolves onSubmittedWorkDone on an
 // internal poll cadence rather than on a fence, so the wait reports ~100 ms
 // on an RTX 5080 whose actual frame is one or two — which read as "this GPU
-// renders 100 ms a frame even at Minimal" while High flew at vsync
-// (observed on Thomas's box, 2026-08-11). A clock cannot be trusted on
+// renders 100 ms a frame even at Minimal" while High flies at vsync.
+// A clock cannot be trusted on
 // reputation; it has to be measured. Before the first probe frame, the
 // round-trip is timed on an EMPTY queue: whatever it costs there is the
 // clock's own overhead, not the GPU's work. The minimum of a few rounds is
@@ -821,14 +799,14 @@ export const AUTO_TIER_WARMUP_FRAMES_CADENCE = 2;
 //
 // The startup probe has two blind spots it cannot measure its way out of.
 // It runs in the first half-second after load, inside the window where the
-// machine is still paying for the load itself — and on Thomas's M1 that
-// window is "seconds to tens of seconds", so a steady-state Minimal of
-// 1.5-4.2 ms (measured 2026-08-19, TWPICE at 1440p) that clears the
+// machine is still paying for the load itself — and on an M1 that
+// window is seconds to tens of seconds, so a steady-state Minimal of
+// 1.5-4.2 ms (TWPICE at 1440p) that clears the
 // escalation gate with only ~11% headroom on its worst view reliably fails
 // it under startup contention, and the verdict sticks at Minimal on a
 // machine that flies Low at 2x margin. And the right tier is not even a
 // per-field constant: DYCOMS's thick backlit view costs 18x its overview
-// (405 vs 22 ms at Low, same day's numbers), so no one-shot verdict from
+// (405 vs 22 ms at Low, on the same M1), so no one-shot verdict from
 // one camera can be right everywhere.
 //
 // So the probe's verdict is a floor, not a sentence. While the camera is
@@ -892,8 +870,8 @@ export const SPEED_WHEEL_FACTOR = 1.25;     // per notch
 export const VERTICAL_SPEED_FRACTION = 0.5;
 export const ELEVATION_LIMITS = [-89.0, 89.0];
 // How close to the sea the camera — and so the bird, which flies off it and
-// has no floor of its own — may get. Halved from 25 m on 2026-08-14. It is
-// still 1.25 ocean FIF outer scales and better than ten times the surface's
+// has no floor of its own — may get. It is
+// 1.25 ocean FIF outer scales and better than ten times the surface's
 // own peak-to-trough, so nothing here is about clipping through a wave: it is
 // how low you are allowed to fly, and lower is better flying.
 export const OCEAN_FLOOR_MARGIN_M = 12.5;
@@ -906,8 +884,8 @@ export const SUN_PRESETS = [
   { name: "sunset", azimuth: 270.0, elevation: 0.5 },
 ];
 // A periodic light march exits only through the domain top, so a sun at or
-// below the horizon has nowhere to go — the engine raises rather than
-// rendering something wrong. The slider stops here instead.
+// below the horizon has nowhere to go — the packers raise rather than
+// render something wrong. The slider stops here instead.
 export const MIN_SUN_ELEVATION_DEG = 0.5;
 
 export const COMPASS_EDGES = [
@@ -917,18 +895,16 @@ export const COMPASS_EDGES = [
 
 // --- capture --------------------------------------------------------------
 
-// A capture's spp is no longer its own constant or slider: it is the chosen
+// A capture's spp is not its own constant or slider: it is the chosen
 // tier's parked count from PARKED_ACCUM_FRAMES_BY_TIER below, exactly what
-// a parked view at that tier settles at (Thomas, 2026-08-20). The Advanced
+// a parked view at that tier settles at. The Advanced
 // panel's override slider runs over this range.
 export const PARKED_SPP_LIMITS = [4, 64];
 // Accumulated frames at the top of the ladder, with the scene unchanged,
 // after which the live loop stops marching.
 //
-// This used to be one 64-frame constant shared with captures, on the
-// argument that a held view and a still are the same picture and must settle
-// at the same point. The argument was right about the picture and
-// wrong about the cost. A capture is a thing you asked for and wait on; a held
+// A held view and a still are the same picture, but they do not cost the
+// same. A capture is a thing you asked for and wait on; a held
 // view is what happens every time you stop for a moment, and on a slow machine
 // 64 marches at the top rung is several seconds of saturated GPU that you then
 // have to fly out of — every one of those frames is already submitted when you
@@ -937,9 +913,8 @@ export const PARKED_SPP_LIMITS = [4, 64];
 // noise a march removes falls as 1/sqrt(n), so 8 -> 32 halves it and 32 -> 64
 // takes another 30%, on top of a picture that is already jitter-averaged.
 //
-// So parking now stops where the returns stop, sooner on the tiers that can
-// least afford not to. A capture still accumulates all 64 — it is explicit,
-// and nobody is waiting to fly out of it (Thomas, 2026-08-14).
+// So parking stops where the returns stop, sooner on the tiers that can
+// least afford not to.
 export const PARKED_ACCUM_FRAMES_BY_TIER = {
   max: 32, high: 32, medium: 24, low: 16, minimal: 8,
 };
@@ -953,12 +928,12 @@ export const PARKED_ACCUM_FRAMES_BY_TIER = {
 //             flew you here. What flying does, and the default.
 //
 // Live exists because of what the Quality panel is FOR. Every control in it
-// changes how the view is drawn while you move, and every one of them was
-// invisible there: the panel is open, the camera is not moving, so the ladder
-// has already converged the view to High's sampling and the tier buttons do
-// nothing you can see. Live holds the flight picture still so the controls
-// have something to act on, and it lasts exactly as long as the panel is open
-// — close it and stills come back (Thomas, 2026-08-14).
+// changes how the view is drawn while you move, and under "still" every one
+// of them would be invisible there: the panel is open, the camera is not
+// moving, so the ladder has already converged the view to High's sampling
+// and the tier buttons do nothing you can see. Live holds the flight picture
+// still so the controls have something to act on, and it lasts exactly as
+// long as the panel is open — close it and stills come back.
 export const HOLD_MODES = ["live", "still"];
 export const DEFAULT_HOLD_MODE = "still";
 // What the Quality panel opens showing, remembered for the session.
@@ -1005,7 +980,7 @@ export const SIGMA_ICE_PREFACTOR =
 // --- column optical depth (glimpse) ---------------------------------------
 //
 // The minimap is a glimpse image, and glimpse does NOT integrate the same
-// sigma the raymarch uses. Liquid now agrees — both are geometric optics with
+// sigma the raymarch uses. Liquid agrees — both are geometric optics with
 // Q_ext = 2 — but ice does not: Ebert & Curry gives 0.0845 m^2/g at
 // r_e = 30 um against sigma's geometric-optics 0.0545. So the map cannot be
 // derived from the extinction volume — it is accumulated separately, from
@@ -1028,21 +1003,20 @@ export const EC92_BAND1_B = 2.431;       // m^2 um / g
 export const TWO_STREAM_G = 0.85;
 export const TWO_STREAM_DENOM = 2.0 / (1.0 - TWO_STREAM_G);   // 13.33...
 
-// --- minimap layout (soar/hud.py) -----------------------------------------
+// --- minimap layout ---------------------------------------------------------
 
 export const MAP_HEIGHT_FRAC = 0.22;
 export const MAP_MAX_WIDTH_FRAC = 0.34;
 export const MAP_MARGIN_FRAC = 0.025;
 export const MAP_OPACITY = 0.74;
-// The same ramp basic_render uses, so a glimpse PNG and the corner of the
+// The same ramp glimpse uses, so a glimpse PNG and the corner of the
 // flight view read as the same picture — and the same one turbulon-analysis
 // plots albedo fields with, so a paper figure does too. Deep ocean blue at
 // clear sky through to white at albedo 1, monotone in lightness: the stops
 // are what make it read as cloud over water instead of as a two-colour map,
-// which is why this is a ramp and not the single blue it used to be
-// (0x3a4aa6, lerped straight to white).
+// which is why this is a ramp and not a single blue lerped to white.
 //
-// Kept byte-for-byte with cloudyview/basic_render.py's `cloud_colors` by
+// Kept byte-for-byte with cloudyview/image.py's `cloud_colors` by
 // tests/test_map_ramp_parity.py, because a comment saying "the same ramp" is
 // exactly what stops being true.
 export const MAP_CLOUD_RAMP = [
@@ -1070,6 +1044,6 @@ export const MAP_CITY_ROOF = [0xf2 / 255, 0xcf / 255, 0x9a / 255];
 // The overlay drawn ON the map — camera dot, field-of-view rays, nest
 // footprint. One warm colour against a blue-to-white field, and the same
 // value as the chrome's --hot and the landing page's --amber, so the marker
-// belongs to the app rather than to the picture. Replaces pure red, which
-// read as an error state and clashed with the cloud ramp at both ends.
+// belongs to the app rather than to the picture. Not red, which reads as an
+// error state and clashes with the cloud ramp at both ends.
 export const MAP_ACCENT = [0xe8 / 255, 0x83 / 255, 0x4a / 255];

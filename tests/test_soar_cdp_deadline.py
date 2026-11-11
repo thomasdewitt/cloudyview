@@ -1,10 +1,10 @@
 """soar_cdp's goto and eval cannot hang a tool forever.
 
 After the waitFor fixes (a throw fails at once; a dead socket and a silent
-evaluate end the wait), two routes were left (loose-ends, review of
+evaluate end the wait), two routes were left (review of
 d81df79): goto waited for Page.loadEventFired with no deadline (and a
 same-document navigation never fires one), and plain tab.eval had no
-deadline, while pinned_still, steam_live_qa and soar_noise run their long
+deadline, while pinned_still runs its long
 async renders through it. Now tab.eval takes a generous deadline
 (EVAL_DEADLINE_MS unless the caller says otherwise) and goto is
 navigateAndLoad: a network failure fails at once with Chrome's reason, a

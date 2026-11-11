@@ -1,8 +1,7 @@
 // The viewer: owns the scene, the frame loop, and the input surface.
 //
-// This is the browser's answer to FlyThroughApp. It keeps world metres and
-// meteorological angles directly and only converts to the relative convention
-// at the edges (reproduction commands, metadata).
+// It keeps world metres and meteorological angles directly and only converts
+// to the relative convention at the edges (reproduction commands, metadata).
 //
 // This file holds the class, its constructor (every field the viewer has)
 // and start(). The methods are in viewer/, one file per concern:
@@ -38,11 +37,10 @@ import { commands } from "./viewer/commands.js";
 export { autoExposureTarget } from "./viewer/exposure.js";
 
 /**
- * The canvas must not present through an sRGB format. raymarch.wgsl's tone
- * map already gamma-encodes, and an sRGB swapchain encodes again — which is
- * exactly the bug that made the desktop window render at an effective gamma
- * near 3.1 for years without anyone naming it. Gamma happens once, in the
- * shader, where the slider can reach it.
+ * The canvas must not present through an sRGB format. The shader's tone
+ * map already gamma-encodes, and an sRGB swapchain encodes again, for an
+ * effective gamma near 3.1 that nothing on screen names. Gamma happens
+ * once, in the shader, where the slider can reach it.
  */
 export function presentFormat(preferred) {
   return preferred.endsWith("-srgb")
@@ -91,9 +89,9 @@ export class Viewer {
     this.captureSize = null;
     this.videoFps = K.DEFAULT_VIDEO_FPS;
     // Captures pick their own tier — a still leans expensive, a video has
-    // hundreds of frames to pay for (Thomas, 2026-08-20). A capture at a
+    // hundreds of frames to pay for. A capture at a
     // named tier is what a PARKED view at that tier converges to, at the
-    // capture size (2026-09-01): the tier's lighting method, parked spp and
+    // capture size: the tier's lighting method, parked spp and
     // look defaults, sampled like the top hold rung. Stored null = "not
     // explicitly picked", which the captureStillTier/-VideoTier getters
     // resolve to the usual defaults — or to "custom" (the session's hand-set

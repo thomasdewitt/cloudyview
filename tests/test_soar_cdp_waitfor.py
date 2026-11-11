@@ -1,12 +1,11 @@
 """soar_cdp's waitFor fails at once when the waited expression throws.
 
 The tools wait on expressions that carry their own failure checks: the
-loading wait in pinned_still, steam_live_qa, sea_speckle_qa, soar_noise and
-surface_cs_timer throws the page's failure panel text when the scene fails to
-load. waitFor polled `tab.eval(expression).catch(() => undefined)`, so that
-throw was swallowed with everything else: ?surfacecs=2 showed its failure
-panel and pinned_still timed out 181 s later with the reason lost
-(loose-ends, 2026-11-09).
+loading wait in pinned_still throws the page's failure panel text when the
+scene fails to load. A waitFor that polled
+`tab.eval(expression).catch(() => undefined)` would swallow that throw with
+everything else: the page would show its failure panel and pinned_still time
+out minutes later with the reason lost.
 
 waitFor is now pollUntil over the tab's Runtime.evaluate. This drives
 pollUntil with stand-in evaluate functions that answer as CDP does: a result,

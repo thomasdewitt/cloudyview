@@ -9,8 +9,8 @@
    night ocean. A frosted panel that reads beautifully over the ocean puts its
    subtitles at 1.1:1 over the cloud, where 4.5:1 is the floor; at 0.94 opaque
    the same text holds 6.2:1 against ANY sky. Panels that cannot be read are
-   not a style. (Eight skins were built and measured against a sunlit cloud
-   top and a night ocean; Thomas picked this one, 2026-08-14.) */
+   not a style. (This skin was chosen from several measured against a sunlit
+   cloud top and a night ocean.) */
 
 #viewer {
   position: fixed;
@@ -617,7 +617,7 @@ button.tutorial-skip:hover { color: var(--ink); border-bottom-color: var(--hot);
 }
 .tutorial-spot[hidden] { display: none; }
 /* The one caption on the screen, in the corner the eye is least likely to be
-   in: at 11.5px it was as quiet as the readout it is there to point out. */
+   in: at 11.5px it would be as quiet as the readout it is there to point out. */
 .tutorial-spot-label {
   position: absolute;
   font-family: var(--ui-mono);

@@ -27,11 +27,11 @@ export const NEEDED_LIMITS = [
 
 // Dawn (Chrome/Edge) clamps maxTextureDimension3D to the spec floor whatever
 // the hardware can do; wgpu (Firefox) passes the real value through. Measured
-// 2026-08-04 on an RTX 5080: Chrome 2048, Firefox 16384. Not a bug we can
+// on an RTX 5080: Chrome 2048, Firefox 16384. Not a bug we can
 // route around — it decides which browser opens a full-resolution LES field.
 // It is a cell count, not a texel count with something subtracted: 2048 is a
 // common LES lateral size and 2046 is not, so soar spends no texel on
-// anything but data (scene.js, raymarch.wgsl sample_level).
+// anything but data (scene.js, volume.wgsl sample_level).
 export const SPEC_FLOOR_TEXTURE_3D = 2048;
 
 export class WebGPUUnavailable extends Error {

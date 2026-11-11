@@ -7,7 +7,7 @@ the opposite faces, so that filtering across the wrap seam was exact. It cost
 two texels on every axis, which is why a 2048-cell field did not open in a
 browser reporting the WebGPU spec floor of 2048 and a 2046-cell one did.
 
-Both behaviours are now computed instead of uploaded (raymarch.wgsl
+Both behaviours are now computed instead of uploaded (volume.wgsl
 sample_level): the wrap is a repeat address mode on the two lateral texture
 axes, and the taper is an analytic window multiplying a clamp-to-edge fetch.
 Neither is an approximation of the old scheme — they are algebraically the
@@ -18,7 +18,7 @@ Two levels of check, because they fail in different ways:
 
   * the identity, in float64 numpy, against an explicit model of the padded
     texture the renderer used to build. No GPU. This is the algebra.
-  * the shader's own sample_level, lifted verbatim out of raymarch.wgsl and
+  * the shader's own sample_level, lifted verbatim out of volume.wgsl and
     run on a real device against the same model. This is the algebra actually
     reaching the card: the coordinate convention, the axis swizzle, and which
     sampler each branch uses. Skips without a GPU.
@@ -67,7 +67,7 @@ def trilinear_clamp(vol, coord):
 def ghost_padded(field, periodic):
     """The texture soar used to upload: (nx+2, ny+2, nz+2), voxel i at i+1.
 
-    Verbatim the old cloudyview.soar_host.write_wrap_ghosts placement, kept
+    Verbatim the old write_wrap_ghosts placement, kept
     here rather than imported because it no longer exists in the renderer and
     this file is the only thing that still needs to know what it did. The four
     corner columns wrap in BOTH x and y — they are the trilinear support of a
@@ -95,7 +95,7 @@ def old_sample(field, g, periodic):
 
 
 def edge_taper(g, n):
-    """raymarch.wgsl edge_taper, in numpy."""
+    """The shader's edge_taper (volume.wgsl), in numpy."""
     return float(np.clip(min(g + 1.0, n - g), 0.0, 1.0))
 
 

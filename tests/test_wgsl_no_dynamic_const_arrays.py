@@ -27,8 +27,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-# The renderer core and every city component (web/soar/raymarch.wgsl is a
-# symlink to the first). The overlay shaders (hud, bird, dart) are separate
+# The renderer core and every city component. The overlay shaders (hud,
+# bird, dart) are separate
 # small pipelines whose full-screen-triangle tables are the one idiom this
 # rule has no quarrel with, so they are not scanned.
 SOURCES = sorted((REPO / "cloudyview" / "soar" / "shader").rglob("*.wgsl"))

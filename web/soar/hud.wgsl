@@ -28,10 +28,10 @@ struct HudUniforms {
 @group(0) @binding(2) var map_samp: sampler;
 
 // The overlay colour: the app's warm accent, matching soar's --hot, the
-// landing page's --amber and basic_render's ACCENT, so the camera marker
+// landing page's --amber and cloudyview/image.py's ACCENT, so the camera marker
 // looks the same in a glimpse PNG and in the corner of the flight view.
-// It replaces pure red, which read as an error state and fought the cloud
-// ramp at both ends.
+// Not red, which reads as an error state and fights the cloud ramp at both
+// ends.
 //
 // Duplicated from MAP_ACCENT in constants.js because a shader constant
 // cannot import; tests/test_map_ramp_parity.py fails if the two drift.
@@ -216,11 +216,10 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     // The dot, with a rim and a halo that keep it findable at both ends of the
     // albedo ramp: white for the dark-ocean end, ink for the bright-cloud end.
     //
-    // Both are sized FROM the dot rather than at fixed pixel offsets. They
-    // used to be +1.2 and +2.0 px, which was fine at the old radius and wrong
-    // the moment it halved — at a 2.5 px dot a fixed +1.2 rim is half again as
-    // wide as the mark it is meant to trim, so the marker would have read as a
-    // white blob with an orange centre.
+    // Both are sized FROM the dot rather than at fixed pixel offsets: at a
+    // 2.5 px dot a fixed +1.2 px rim is half again as wide as the mark it is
+    // meant to trim, so the marker would read as a white blob with an orange
+    // centre.
     let marker_d = length(p - cam);
     let rim_w = max(0.7, u.frame.w * 0.45);
     let outer = disk_coverage(marker_d, u.frame.w + rim_w * 2.0);

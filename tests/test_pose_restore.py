@@ -1,14 +1,13 @@
 """A capture's pose, handed back to the camera, is the pose it was taken at.
 
-The QA tools stand the camera at a soar screenshot's pose (tools/
-steam_live_qa.mjs and tools/soar_noise.mjs, --pose-png): the capture's
-city.position_m is the camera's surfacePosition and its z (viewer.js
-_renderMetadata), and the tools move the camera by the difference. They
+A QA tool stands the camera at a soar screenshot's pose: the capture's
+city.position_m is the camera's surfacePosition and its z (viewer/commands.js
+renderMetadata), and the tool moves the camera by the difference. They
 did it with camera.displace, which is a move of flight, so the city
 collider's next resolve swept the jump — tens of kilometres from wherever
-the camera stood — and stopped at the first wall on the way. Thomas's
-screenshots at z 14.5 m and 6.9 m came back at 294 m and 910 m, over other
-streets (2026-11-09). They now move by camera.jump, which bumps the epoch
+the camera stood — and stopped at the first wall on the way: screenshots at
+z 14.5 m and 6.9 m came back at 294 m and 910 m, over other
+streets. They now move by camera.jump, which bumps the epoch
 the collider tracks the flight by.
 
 This flies the real FlightCamera and CityCollider in node over a stand-in

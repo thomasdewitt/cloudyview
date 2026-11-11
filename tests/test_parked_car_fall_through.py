@@ -7,8 +7,8 @@ then, if the ray misses that car's hull inside its box, the next box along
 the ray, up to cc_streetlife_NEAR_TRIES boxes. Until 2026-11-09 it tried
 one: a ray that entered a car's box and missed the hull returned a miss, and
 from a few metres up the ray to a parked car's lower body passes through the
-box of the car parked in front of it, just over that car's roof. Thomas saw
-the body vanish behind an invisible box face, its roof left floating ("it
+box of the car parked in front of it, just over that car's roof. The body
+vanished behind an invisible box face, its roof left floating ("it
 looked as though there was an invisible object in front of the car"; flight
 of dev 1853300).
 
@@ -20,7 +20,7 @@ The negative control is the old single try, which must disagree with the
 exhaustive trace on many pixels, or these views would not be holding
 anything.
 
-Skips without a real GPU adapter. Run it through tools/gpulock.
+Skips without a real GPU adapter.
 """
 
 from pathlib import Path

@@ -502,15 +502,14 @@ def test_row24_is_the_folded_surface_offset(result):
 
 
 def test_the_shader_derives_water_and_city_from_the_tile_frame():
-    """Textual pin on raymarch.wgsl: the water samples subtract the row-24
-    offset, the city enters its frame exactly once (city_camera_origin),
-    the glow is a plain tile read of that frame, and every cell-index draw
+    """Textual pin on the shader: the water samples subtract the surface
+    offset (u.surface_offset), the city enters its frame exactly once
+    (city_camera_origin), the glow is a plain tile read of that frame, and every cell-index draw
     folds at the tile before it seeds anything — the property that makes a
     building a function of its tile coordinate, so a replayed track (which
     serializes only the tile phase) renders the very buildings that were
     flown past. GPU renders cannot run here; this catches the edit that
-    quietly reverts one site — a regenerated city block included, since the
-    composer rewrites the GENERATED section wholesale."""
+    quietly reverts one site."""
     src = SHADER.read_text()
     # The water's tile read samples the offset-corrected frame.
     assert ShaderModule("ocean").read_text().count(

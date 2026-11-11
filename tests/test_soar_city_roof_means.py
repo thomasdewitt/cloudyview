@@ -32,7 +32,7 @@ plain pass that evaluates it once per pixel:
    the run pattern the trim is drawn with, for footprints from a few
    centimetres to a few fixture pitches, far out along the coping.
 (The penthouse's glass wall had its own check here until 2026-11, when the
-crown became core massing, raymarch.wgsl city_crown, and its walls the
+crown became core massing, city/facade.wgsl city_crown, and its walls the
 core facade's.)
 
 Needs a real GPU; skips cleanly without one.

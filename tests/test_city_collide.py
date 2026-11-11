@@ -1,10 +1,9 @@
 """Flying into the night city: stopped at the wall, knocked, and let go.
 
-web/soar/collide.js is the flight collider (Thomas, 2026-09-23: "the
-buildings currently just disappear when you fly into them, but probably the
-paper airplane should be rocked, like you loose control for a sec and it
-falls a bit"). These tests fly the real FlightCamera through the real
-collider, frame by frame in node, in the order viewer.js runs them, with a
+web/soar/collide.js is the flight collider: a building flown into stops the
+flight and rocks the flyer, which loses control for a moment and falls a
+little. These tests fly the real FlightCamera through the real collider,
+frame by frame in node, in the order viewer/loop.js runs them, with a
 stand-in flyer placed the way flyer.js places one (ahead of the camera by
 its distance, hanging below by its drop):
 
@@ -90,7 +89,7 @@ class BoxCity {
 }
 """
 
-# The flight loop, as viewer.js _frame runs it, with a stand-in flyer.
+# The flight loop, as viewer/loop.js _frame runs it, with a stand-in flyer.
 FLY_JS = """
 import { FlightCamera, cameraBasis, worldToRelative } from "%(soar)s/camera.js";
 import { CityCollider } from "%(soar)s/collide.js";
@@ -454,8 +453,8 @@ def test_a_raised_freeway_is_smooth_to_fly_along():
     # Resting on the high span of the y-route at x = 26640 over its crossing
     # at y = 51840 (deck top 34 m; the camera's radius and the collider's
     # clearance above it), and flying level along the deck past either
-    # crest, where the ramps begin: no wall (loose-ends found one, the
-    # ramp's grown end face 1.4 cm proud of the flat's). Then along the low
+    # crest, where the ramps begin: no wall (a ramp's grown end face would
+    # stand 1.4 cm proud of the flat's). Then along the low
     # deck into the foot of a ramp: met, but as a road rising, not a wall.
     x, ac, rest = 26640.0, 51840.0, 34.0 + 0.35 + 0.01
     segs = [[[x, ac - 40, rest], [x, ac - 80, rest]],
@@ -518,7 +517,7 @@ process.stdout.write(JSON.stringify({
 
 
 def test_a_penthouse_crown_is_solid():
-    # The crown is core massing (raymarch.wgsl city_crown): flown into level
+    # The crown is core massing (city/facade.wgsl city_crown): flown into level
     # at its mid-height from over the roof, it is met at its west wall grown
     # by the tower's relief and the camera's radius — and a metre over its
     # top, nothing is.
@@ -620,7 +619,7 @@ def test_starting_inside_a_building_puts_you_on_its_roof():
 @pytest.mark.parametrize("start,roof", [
     # A 266 m tower with no crown and no mast (cell (241, 680)): its top_z
     # carries a crown's 10.8 m of headroom all the same, and the camera
-    # must land on the roof, not on that bound (loose-ends, 2026-11).
+    # must land on the roof, not on that bound.
     ([21735.96, 61254.10, 256.4], 266.4),
     # A 112 m tower with a 7.2 m crown (cell (221, 680)), started under the
     # crown: lifted onto the roof, which is inside the crown, then onto the
@@ -652,7 +651,7 @@ def test_looking_round_beside_a_wall_is_not_a_crash():
     (20.0, 60, True), (5000.0, 60, True),
     # Held into the wall at the fastest the wheel allows, on a machine
     # drawing 10 frames a second: a spline through these samples replayed
-    # the camera 34 m through the wall (codex, 2026-09-23).
+    # the camera 34 m through the wall.
     (5000.0, 10, False)])
 def test_a_replayed_crash_stays_out_of_the_wall(speed, fps, release):
     # The video pass interpolates the recorded poses, over the city in

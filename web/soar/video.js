@@ -9,7 +9,7 @@
 // seconds no matter how long it took to converge. Mediabunny muxes the
 // resulting chunks into a real container in memory.
 //
-// A frame ZIP is not a fallback. It is not a video (Thomas, 2026-08-04). If
+// A frame ZIP is not a fallback. It is not a video. If
 // nothing here can encode, this module throws and says why.
 //
 // Public API

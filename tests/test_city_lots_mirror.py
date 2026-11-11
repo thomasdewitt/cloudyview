@@ -1,6 +1,6 @@
 """The flight collider's buildings are the renderer's buildings.
 
-web/soar/citylots.js mirrors raymarch.wgsl's city_cell on the CPU so that the
+web/soar/citylots.js mirrors the shader's city_cell on the CPU so that the
 paper aeroplane bounces off the wall that is on screen (collide.js). A mirror
 that drifts from its original is worse than none — the flyer would bounce off
 air beside a tower, or pass into one and watch it vanish, which is the bug the
@@ -13,7 +13,7 @@ goes each building's facade relief depth (city_shell_style's, which the
 collider grows the walls by), so the flight meets the wall the shell draws.
 
 The shader is not compiled whole. The functions city_cell needs are cut out of
-raymarch.wgsl by name, with every CITY_ constant, and wrapped in a compute
+the city module by name, with every CITY_ constant, and wrapped in a compute
 entry point over stub declarations of the two globals they read: the uniform
 block's ocean_params (x = block pitch, y = tile extent) and the city tile at
 ocean_normals. So a change to city_cell is tested as written, and a new
@@ -22,13 +22,12 @@ function it starts calling shows up here as a compile error naming it.
 What float32 cannot promise is pow(): the height law's pow() is the GPU's
 approximation, so a building whose raw height lands within an ulp of a
 storey boundary can come out a storey different in the mirror. A sweep of
-every cell of the shipped tile (1,048,576) on 2026-09-23 found exactly one
+every cell of the shipped tile (1,048,576) found exactly one
 such building; the fixed sample here does not contain it, and the check
 stays tolerance-free on the discrete fields so that anything more than that
 shows up.
 
-Skips when node or a real GPU adapter is missing. Run it through
-tools/gpulock.
+Skips when node or a real GPU adapter is missing.
 """
 
 import json

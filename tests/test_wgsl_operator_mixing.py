@@ -4,7 +4,7 @@
 (^ | & << >>) may not share a parenthesis level with a different binary
 operator. Tint (Chrome, Safari) enforces it and refuses the whole module;
 naga (wgpu, so every Python host and test here) accepts it. So a mix passes
-the whole suite and compose_city's validation and then breaks every mode in
+the whole suite's other checks and then breaks every mode in
 the browser — which is how 7affb9a reached master (city_ground_mottle's
 `bitcast<u32>(jw.y) ^ u32(o) * 0x297a2d39u`). This scans the shader and every
 city component the way Tint's grammar reads them.

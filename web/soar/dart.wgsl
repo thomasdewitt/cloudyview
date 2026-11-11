@@ -96,7 +96,7 @@ const FLUTTER_WAVES: f32 = 7.5;
 const FLUTTER_AMPLITUDE_M: f32 = 0.006;
 
 // ---------------------------------------------------------------------------
-// Shared-convention helpers (duplicated from raymarch.wgsl; keep in sync)
+// Shared-convention helpers (duplicated from the shader's volume.wgsl; keep in sync)
 // ---------------------------------------------------------------------------
 
 fn ray_box(origin: vec3<f32>, inv_dir: vec3<f32>) -> vec2<f32> {

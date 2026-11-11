@@ -8,7 +8,8 @@
 // dim the screen around the item being named and wait for OK. The research
 // coda runs once, the first time research mode is switched on.
 //
-// Nothing here reaches into the viewer's input handling: viewer.js notifies
+// Nothing here reaches into the viewer's input handling: the viewer
+// (viewer/input.js) notifies
 // `onInput(kind, detail)` from the handlers it already has, and this decides
 // whether that was the thing the current step asked for.
 
@@ -155,7 +156,7 @@ const RESEARCH_STEPS = [
   },
   // Second, not last: bringing your own field is the reason to be in research
   // mode at all, and a walkthrough that reaches it after two rows about how
-  // the picture is drawn buries the offer (Thomas, 2026-08-22).
+  // the picture is drawn buries the offer.
   {
     menuKey: "open",
     text: "Supply your own cloud volume in a NetCDF file. Liquid and ice " +
@@ -222,8 +223,8 @@ export class Tutorial {
     // While a chapter is running the menu is a diagram, not a control. Every
     // menu step names a row that opens a panel, and opening one takes the
     // walkthrough somewhere it was not going: clicking Capture at the Capture
-    // step left the capture panel up, the spotlight aimed at a row that was no
-    // longer there, and no way on but Skip (Thomas, 2026-08-22).
+    // step would leave the capture panel up, the spotlight aimed at a row that
+    // is no longer there, and no way on but Skip.
     // Capture phase, so the row's own handler never runs — stopping the event
     // here stops it before the target phase.
     // Resume is the exception, and has to be: a flight step interrupted by
@@ -508,9 +509,9 @@ export class Tutorial {
   /**
    * Put the box under the menu rather than over it.
    *
-   * The menu chapter talks about rows of the menu, so it cannot cover it: the
-   * box used to sit at the top of the window, which is where a tall menu's own
-   * top edge is. Under the menu is the one place that is out of the way and
+   * The menu chapter talks about rows of the menu, so it cannot cover it,
+   * and the top of the window is where a tall menu's own top edge is. Under
+   * the menu is the one place that is out of the way and
    * still obviously attached to what is being pointed at.
    *
    * The menu keeps room for it — see `#viewer.tutorial #menu` in viewer.css —
@@ -562,7 +563,7 @@ export class Tutorial {
 
   // --- what the viewer reports ---------------------------------------------
 
-  /** Called from viewer.js's own input handlers. See the module note. */
+  /** Called from the viewer's own input handlers. See the module note. */
   onInput(kind, detail) {
     const step = this.step;
     if (!step?.when) return;
@@ -570,8 +571,8 @@ export class Tutorial {
     // The flight chapter, interrupted. Every one of its steps is cleared by
     // flying, and a paused flight cannot fly: pressing Escape at the WASD
     // prompt — or switching apps, which drops the pointer lock and pauses the
-    // same way — left a step up that no key could satisfy and no button could
-    // advance, so the only way on was Skip (Thomas, 2026-08-22).
+    // same way — would leave a step up that no key could satisfy and no button
+    // could advance, so the only way on would be Skip.
     // The chapter starts over rather than stepping forward. Its first prompt
     // is "click once and move the mouse", which is exactly what the reader is
     // about to do to get back into the flight, and Resume then clears it.

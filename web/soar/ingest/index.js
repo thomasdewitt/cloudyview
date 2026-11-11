@@ -135,10 +135,9 @@ function levelReceiver(device, label, onProgress, ack, { iceOnly = false } = {})
         const err = new Error(
           `This field needs ${worst} texels on ${axis}; this browser allows ` +
           `${cap}. Cropping empty sky cannot help — it only ever shrinks z.`);
-        // No tool named here on purpose. This used to point at
-        // tools/decimate_field.py, which has since been deleted, and advice
-        // that names a file the reader cannot find is worse than advice that
-        // says what to do — box-averaging is exact for extinction (it is
+        // No tool named here on purpose: advice that names a file the reader
+        // cannot find is worse than advice that says what to do —
+        // box-averaging is exact for extinction (it is
         // linear in the mixing ratios), so anyone can do it in four lines.
         err.advice = cap <= SPEC_FLOOR_TEXTURE_3D
           ? "Chrome reports the WebGPU spec minimum of 2048 no matter what " +
@@ -217,12 +216,11 @@ function levelReceiver(device, label, onProgress, ack, { iceOnly = false } = {})
   //
   // Everything that can fail above is fatal, and the first thing to run is the
   // volume allocation. A field too large for the card therefore FAILS in the
-  // first second — but the error used to be read only after the extinction RPC
-  // resolved, and that RPC resolves when the worker has sent the whole field.
-  // So an 8-gigavoxel run spent several minutes decompressing, transposing and
-  // posting slabs into a texture that had never existed, and only then said it
-  // was out of memory. The catch is unchanged; what is new is that somebody is
-  // listening while it still matters.
+  // first second — but read only after the extinction RPC resolved, which is
+  // when the worker has sent the whole field, the error would let an
+  // 8-gigavoxel run spend several minutes decompressing, transposing and
+  // posting slabs into a texture that never existed, and only then say it
+  // was out of memory. So somebody listens while it still matters.
   let announceFailure;
   const failed = new Promise((_, reject) => { announceFailure = reject; });
   // The success path never awaits this, and an unobserved rejection is a
@@ -269,7 +267,7 @@ export async function loadFileScene(
   });
 
   // A throw anywhere below — a refused nest, a map that never arrived, an
-  // ocean that would not load — used to leave whatever had already been
+  // ocean that would not load — must not leave whatever had already been
   // allocated to the garbage collector, which is a poor custodian of several
   // gigabytes of video memory. The catch at the end gives it all back: every
   // volume texture is reachable through `receivers` from the moment it is
@@ -396,7 +394,7 @@ export async function loadFileScene(
     }
 
     // Which timestep. Silent on the single-step files that are most of them;
-    // a multi-step file used to be refused outright here.
+    // a multi-step file is asked, not refused.
     const stepped = chosen.find((g) => g.needsTimestepChoice);
     if (stepped) {
       const answer = await ask({
@@ -472,7 +470,7 @@ export async function loadFileScene(
     // A warm-looking file plus the ice somebody has beside it.
     //
     // Asked HERE, at load, and not when the ice-detection mode is first
-    // pressed (Thomas, 2026-08-22). The reason is not interface tidiness: the
+    // pressed. The reason is not interface tidiness: the
     // extinction this load is about to compute INCLUDES ice, so a second file
     // that turned up later would mean the field on screen had been rendered
     // without its ice all along and the fraction would then be measured
@@ -593,8 +591,8 @@ export async function loadFileScene(
     for (const [index, level] of chosen.entries()) {
       const label = level.path || "(root)";
       const share = 0.9 / chosen.length;
-      // Two phases now, and they are worth naming separately: the read is the
-      // slow one and ends at the crop, the upload is what the old bar showed.
+      // Two phases, and they are worth naming separately: the read is the
+      // slow one and ends at the crop, then the upload.
       // Each gets half the level's share so neither appears to stall.
       const receiver = levelReceiver(device, label, (done, n, of, phase) =>
         progress(

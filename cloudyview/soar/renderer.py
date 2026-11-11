@@ -612,8 +612,9 @@ class SoarRenderer:
                 f"scene says surface={state.surface!r}. Build a renderer for "
                 "the scene you mean to render.")
         # Periodicity and the nest are compiled in the same way (the
-        # PERIODIC_DOMAIN and NESTED switches); the scene's rows 20.x and
-        # 21-22 describing something else would be packed and ignored.
+        # PERIODIC_DOMAIN and NESTED switches); the scene's row 20.x and
+        # rows 7-8 (the nest) describing something else would be packed and
+        # ignored.
         if bool(state.periodic) != self.periodic or bool(state.nested) != self.nested:
             raise RuntimeError(
                 f"This renderer was compiled with periodic={self.periodic}, "

@@ -1,6 +1,6 @@
 """What the upload path recognizes, and what it refuses to guess.
 
-Two failures Thomas hit in one morning (2026-08-22) are what this pins.
+Two failures met in one morning are what this pins.
 
 The first: a SAM file whose dimensions are `(zt, yt, xt)` — cell centres, the
 spelling SAM has always used — died on "Could not tell which dimensions are x,
@@ -706,7 +706,7 @@ def test_a_variable_no_list_contains_can_be_chosen(result):
 
 
 def test_liquid_inferred_but_ice_not_asks_only_about_ice(result):
-    """Thomas's example: 'Inferred liquid condensate as clw. Could not infer
+    """The example: 'Inferred liquid condensate as clw. Could not infer
     ice condensate variable. Which variable is ice?'"""
     got = result["iceAsked"]
     assert got["ok"], got.get("message")

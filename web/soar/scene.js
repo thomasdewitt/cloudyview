@@ -5,12 +5,12 @@
 // The volume's texture layout is the one piece here worth stating plainly.
 // A C-order (nx, ny, nz) array already has z varying fastest, so it maps onto
 // a 3D texture of width nz, height ny, depth nx with no reshuffling at all;
-// raymarch.wgsl swizzles its sample coordinates to match. Nothing is padded:
-// voxel i is texel i. The boundary behaviour the ghost ring used to buy —
-// witness's linear taper into zero, and the periodic wrap — is a sampler
+// the shader (volume.wgsl) swizzles its sample coordinates to match. Nothing
+// is padded: voxel i is texel i. The boundary behaviour — witness's linear
+// taper into zero, and the periodic wrap — is a sampler
 // address mode plus an analytic window in the shader (sample_level), which
-// is exact and does not cost a 2048-cell axis the two texels that put it over
-// a browser's 3D texture limit.
+// is exact and does not cost a 2048-cell axis the two ghost texels that would
+// put it over a browser's 3D texture limit.
 
 "use strict";
 
@@ -83,7 +83,7 @@ async function fetchDecompressedStream(url, onProgress, decompress = null) {
     : stream;
 }
 
-// Channels per texel of each surface-tile format (soar_host's
+// Channels per texel of each surface-tile format (soar/surfaces.py
 // SURFACE_FORMAT_CHANNELS): the ocean and the city are rgba16float.
 const SURFACE_FORMAT_CHANNELS = { rgba16float: 4 };
 
@@ -92,7 +92,8 @@ const SURFACE_FORMAT_CHANNELS = { rgba16float: 4 };
  * A level is either the texels themselves, or (encoding
  * "planar-byte-shuffle", the ocean's) each channel's plane with every half
  * float's low bytes before its high bytes, the arrangement that lets gzip
- * see a smooth field's smoothness. Twin of soar_host.decode_surface_level.
+ * see a smooth field's smoothness. Twin of soar/surfaces.py
+ * decode_surface_level.
  */
 export function decodeSurfaceLevel(bytes, side, meta) {
   const format = meta.format ?? "rgba16float";
@@ -251,7 +252,7 @@ export async function loadOceanTile(device, baseUrl, onProgress,
 
 /** A tile's clock_period_s: a positive period, or null for a surface with
  *  no clock. Missing is an error, not a surface without a clock
- *  (soar_host.surface_clock_period_s is the twin). */
+ *  (soar/surfaces.py surface_clock_period_s is the twin). */
 export function tileClockPeriod(meta, baseUrl) {
   if (!("clock_period_s" in meta)) {
     throw new Error(`${baseUrl}/meta.json has no clock_period_s (a period ` +
@@ -307,7 +308,7 @@ export async function createVolumeTexture(device, shape, label,
       // into a 2048x2048x512 fp16 field therefore asked Windows for a
       // 4294967296-byte staging buffer, twice D3D12's 2147483648 cap, and
       // the upload died with "Buffer size exceeds the max buffer size
-      // limit" (bug report, RTX 5060, 2026-09-13; the same field loads on
+      // limit" (reported on an RTX 5060; the same field loads on
       // Metal, whose buffers are allowed to be that large). Allowing the
       // render-target path costs nothing and makes the clear a
       // ClearRenderTargetView over the depth slices, no staging at all.
@@ -352,15 +353,15 @@ export const UPLOAD_DRAIN_BYTES = 64 * 1024 * 1024;
  * Upload a whole field straight off a byte stream, one slab at a time.
  *
  * NOT one writeTexture call. Firefox rejects a source view larger than 2 GB
- * outright ("ArrayBufferView ... larger than 2 GB"), which the 4.2 GB STEAM
- * desert field walked straight into. x is the texture's depth axis
+ * outright ("ArrayBufferView ... larger than 2 GB"), which a 4.2 GB STEAM
+ * field is. x is the texture's depth axis
  * (width=nz, height=ny, depth=nx), so a run of x planes is contiguous in
  * the source and needs no repacking.
  *
- * The demo path used to inflate the entire gzipped volume into one JS
- * ArrayBuffer and only then upload — which for the 4.15 GB desert field,
- * on top of the 4.15 GB texture, is more than an 8 GB machine has, and
- * Chrome kills the fetch mid-stream with a bare "Failed to fetch". Here the
+ * Inflating the entire gzipped volume into one JS ArrayBuffer and only then
+ * uploading would hold, for a 4.15 GB field, 4.15 GB on top of the 4.15 GB
+ * texture, which is more than an 8 GB machine has, and Chrome kills the
+ * fetch mid-stream with a bare "Failed to fetch". Here the
  * JS heap never holds more than one UPLOAD_DRAIN_BYTES slab: the texture is
  * the only multi-gigabyte allocation, which is what lets a field of nearly
  * the machine's memory load at all.
@@ -449,13 +450,13 @@ export async function streamWholeVolume(device, texture, stream, shape,
 /**
  * A world position in the city tile's own frame, or null off a city scene.
  *
- * This is raymarch.wgsl's city_glow_sample mapping and nothing else:
+ * This is the shader's city_fold_xy (city/layout.wgsl) and nothing else:
  *
- *     uv = (xy - u.ocean.yz) / u.ocean_params.y
+ *     q = (xy - u.surface_offset) / u.tile_extent
  *
- * with the tile sampler repeating, i.e. only the fractional part of uv
- * selects a block. So the city coordinate of a camera is
- * `(worldXY - cityOffsetM) mod tileExtent`, folded into `[0, tileExtent)`,
+ * of which only the fractional part selects a block. So the city
+ * coordinate of a camera is `(worldXY - cityOffsetM) mod tileExtent`,
+ * folded into `[0, tileExtent)`,
  * and z is world z unchanged (the tile is 2D; CITY_GROUND_Z is world).
  *
  * The fold is what makes the number worth showing. Relative coordinates
@@ -465,8 +466,8 @@ export async function streamWholeVolume(device, texture, stream, shape,
  * city whatever field is flying over it.
  *
  * Callers must pass the scene's own `cityOffsetM` and `oceanTileExtent` —
- * the same two values uniforms.js writes into rows 8 and 9 — so the readout
- * and the shader cannot disagree.
+ * the values uniforms.js packs u.surface_offset and u.tile_extent from — so
+ * the readout and the shader cannot disagree.
  */
 export function cityFramePosition(position, cityOffsetM, tileExtentM) {
   if (!(tileExtentM > 0)) return null;
@@ -543,11 +544,9 @@ export class Scene {
 
   /**
    * Why the ice fraction is not on offer, or null when it is. A fact about
-   * the data rather than a failure, and since the demos gained their own
+   * the data rather than a failure, and since the demos carry their own
    * prebaked ice volumes it is the SAME fact in both cases: the source this
-   * field came from carried no ice. (It used to be two — a bake threw the
-   * phase split away — and that is no longer true of any case that has one
-   * to throw.)
+   * field came from carried no ice.
    */
   get iceNote() {
     if (this.iceAvailable) return null;
@@ -806,7 +805,7 @@ export async function loadDemoScene(device, baseUrl, surface, progress,
         compression: meta.ice.compression === "gzip" ? "gzip" : null,
         format: meta.ice.format,
       } : null,
-      // Under a forced city the demo's sun is a desert afternoon and the
+      // Under a forced city the demo's sun is a daylight sun and the
       // scene's light is a moon, so the mode's moon replaces it. A demo that
       // asked for the city itself carries a moon in this field already.
       //

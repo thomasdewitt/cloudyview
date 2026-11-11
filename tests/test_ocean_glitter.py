@@ -1,7 +1,7 @@
 """The sea's glitter: the sun's reflection drawn as the facets that catch it.
 
 The glint is the smooth Cox-Munk lobe times 1 + core (draw - 1), the draw
-K ~ Poisson(lambda) lognormal facets over lambda (raymarch.wgsl
+K ~ Poisson(lambda) lognormal facets over lambda (ocean.wgsl
 sea_poisson, sea_glitter_brightness). Its mean is 1, so the glitter moves
 no energy: the tests compute that mean exactly from the shader's own
 source, and show that breaking the sampler would move it.
@@ -32,7 +32,7 @@ def _fn_body(src, name):
 
 def _glitter_mean(lam, src):
     """E[sea_glitter_brightness(K) / lambda], K = sea_poisson(lambda), as
-    the given raymarch.wgsl computes them — exactly, not sampled.
+    the given shader computes them — exactly, not sampled.
 
     The port takes from the source everything the mean depends on: the
     normal branch's threshold; the inversion's start, step, pmf divisor,

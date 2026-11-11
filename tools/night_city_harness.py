@@ -220,12 +220,11 @@ def main(argv=None) -> int:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # One render at a time across every harness process: several component
-    # agents iterate on this GPU concurrently — while Thomas flies on it —
-    # and unserialized they pile up into contention that stutters the flight
-    # and poisons every timing number. The lock queues harness runs; the
-    # flight cannot take the lock, so timings measured here are still only
-    # trustworthy when nobody is flying.
+    # One render at a time across every harness process: harness runs on
+    # one GPU, unserialized, pile up into contention that stutters a flight
+    # on the same GPU and poisons every timing number. The lock queues
+    # harness runs; the flight cannot take the lock, so timings measured
+    # here are still only trustworthy when nobody is flying.
     import fcntl
     lock_file = open("/tmp/soar-harness-gpu.lock", "w")
     try:
@@ -312,8 +311,8 @@ def main(argv=None) -> int:
         views = {"camera": {"xy": None, "world_xy": (x, y), "z": z,
                             "azimuth": az, "elevation": el, "fov": fov}}
     if args.city_camera is not None:
-        # The inverse of raymarch.wgsl's city_glow_sample mapping
-        # (uv = (xy - offset) / extent, sampler repeating), which is the same
+        # The inverse of the shader's city_fold_xy mapping
+        # ((xy - offset) / extent, folded into the tile), which is the same
         # arithmetic web/soar/scene.js cityFramePosition does forwards:
         #   world_xy = city_xy + offset  (mod the tile extent, which the
         #   repeating sampler and the periodic volume both absorb).

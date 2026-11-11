@@ -4,7 +4,7 @@
 //
 // Why: tools/soar_shader_ab.py drives one Python host against two shader
 // revisions, which cannot compare a change that also moves the hosts (a new
-// binding, a new pass: the surface pre-pass, 2026-09-23). This compares the
+// binding, a new pass). This compares the
 // whole browser build — hosts and shader together — so run it once per tree
 // and diff the lines.
 //

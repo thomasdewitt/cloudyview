@@ -5,8 +5,8 @@
 
    Careful with comments here: a stray asterisk-slash (as in a glob like
    thought-cloud slash star slash index.html) closes the comment early, and
-   the parser then discards rules until it can resync — which silently took
-   the whole :root block with it once, leaving every custom property
+   the parser then discards rules until it can resync — which can silently
+   take the whole :root block with it, leaving every custom property
    undefined and the loading overlay transparent. */
 
 :root {
@@ -28,18 +28,18 @@
      Amber already means "this is the thing you are pointing at" — it is the
      hover border, the group rule, the primary button and the click cursor —
      so a caution set in amber would be indistinguishable from a row being
-     active. This red was already here as #capability.bad; it is now a token
-     so the page has one red rather than two. */
+     active. It is a token, used by #capability.bad too, so the page has one
+     red rather than two. */
   --alarm: #ef7a7a;
 
-  /* --- borrowed from viewer.css, and the reason this page was redesigned ---
-     The cards here used to be rgba(8,13,20,0.42) behind a 14px backdrop
-     blur. A backdrop filter blurs what is behind a panel without darkening
-     it, so the type sat on the mean of whatever the reel was showing — and
-     0.42 over a sunlit cloud top measures 1.1:1 where 4.5:1 is the floor.
-     The viewer settled that argument on 2026-08-14 with eight skins measured
-     against a sunlit cloud and a night ocean; this page now uses the answer
-     rather than a second opinion. Opaque, square, unblurred. */
+  /* --- borrowed from viewer.css ---------------------------------------------
+     Not a translucent card behind a backdrop blur. A backdrop filter blurs
+     what is behind a panel without darkening it, so the type sits on the
+     mean of whatever the reel is showing — and rgba(8,13,20,0.42) over a
+     sunlit cloud top measures 1.1:1 where 4.5:1 is the floor. The viewer's
+     panel skin was measured against a sunlit cloud and a night ocean; this
+     page uses the same answer rather than a second opinion. Opaque, square,
+     unblurred. */
   --panel-bg: rgba(6, 9, 13, 0.94);
   --panel-line: rgba(150, 172, 200, 0.22);
   --panel-radius: 2px;
@@ -50,7 +50,7 @@
   --transition-fast: 0.15s ease;
 
   /* --- the pointer ---------------------------------------------------------
-     A paper dart with its nose on the hotspot: the flyer the app now opens
+     A paper dart with its nose on the hotspot: the flyer the app opens
      with, as the cursor. Two states differing only in fill — paper white by
      default, amber when there is something to click.
 
@@ -65,15 +65,13 @@
      skins were measured against.
 
      WHY THE CLICK STATE MAY BE SATURATED WHEN THE REST OF THE CHROME MAY NOT.
-     An earlier version made the DEFAULT cursor amber, and it clashed with the
-     imagery constantly, because the default cursor is over cloud most of the
-     time. The click state is the opposite: it appears only on the opaque
-     panels, cards and buttons, since that is where the clickable things are,
-     and the render itself deliberately keeps the white dart. Thomas,
-     2026-08-14: "the hover over is good because it's only active when over
-     black boxes. when over clouds, it's white which is good." Keep that
-     property when adding controls — an amber pointer over the sky is the
-     thing this arrangement exists to avoid.
+     An amber DEFAULT cursor would clash with the imagery constantly, because
+     the default cursor is over cloud most of the time. The click state is
+     the opposite: it appears only on the opaque panels, cards and buttons,
+     since that is where the clickable things are, and the render itself
+     deliberately keeps the white dart: amber over black boxes, white over
+     clouds. Keep that property when adding controls — an amber pointer over
+     the sky is the thing this arrangement exists to avoid.
 
      Derived from the 4-triangle plus on thomasddewitt.com, which shares the
      two-state idea; the artwork differs because soar is not warm paper. */
@@ -110,14 +108,14 @@ html, body {
   position: fixed; inset: 0; overflow: hidden;
   filter: saturate(0.92) contrast(1.04);
 }
-/* A still rather than a loop. A 60 s 1440p60 video ran 30-110 MB per demo —
-   for the FIF cascade, fifteen times the weight of the field it advertises —
+/* A still rather than a loop. A 60 s 1440p60 video runs 30-110 MB per demo —
+   for a small field, fifteen times the weight of the field it advertises —
    against 60-210 kB for a 4K still.
 
-   And a still that actually holds still: this carried a 110 s scale-and-pan
-   drift to buy back a sense of movement, which is exactly what a converged
-   render of a cloud field should not do (Thomas, 2026-08-15). The only motion
-   left on the page is the cross-fade between one case and the next. */
+   And a still that actually holds still: no slow scale-and-pan drift to buy
+   back a sense of movement, which is exactly what a converged render of a
+   cloud field should not do. The only motion on the page is the cross-fade
+   between one case and the next. */
 #reel img {
   position: absolute; inset: 0;
   width: 100%; height: 100%;
@@ -137,11 +135,10 @@ body.mode-cyberpunk #reel-cyberpunk { opacity: 1; }
 #reel::after {
   content: '';
   position: absolute; inset: 0;
-  /* Lighter than it was on every stop. The scrim exists to keep small type
-     legible, but the type that most needed it (the wordmark, the group heads)
-     now carries its own halo — so the picture can come forward and the
-     vignette can stop announcing itself. Roughly two thirds of the old
-     strength at the corners and a little over half at the edges. */
+  /* Light on every stop. The scrim exists to keep small type legible, but
+     the type that most needs it (the wordmark, the group heads) carries its
+     own halo — so the picture can come forward and the vignette does not
+     announce itself. */
   background:
     radial-gradient(120% 90% at 50% 38%, transparent 26%,
                     rgba(5, 8, 12, 0.35) 70%, rgba(5, 8, 12, 0.62) 100%),
@@ -177,8 +174,8 @@ body.previewing #reel::after { opacity: 0.45; }
   height: 100%;
   display: grid;
   /* `auto`, sized by .cases's own width, so the column can be animated —
-     see "basic vs research" below. It was minmax(18rem, 21rem); .cases now
-     carries the 21rem itself and the max-width keeps it off narrow screens. */
+     see "basic vs research" below. .cases carries the 21rem itself and the
+     max-width keeps it off narrow screens. */
   grid-template-columns: auto 1fr;
   grid-template-rows: auto 1fr auto;
   column-gap: 3rem;
@@ -245,11 +242,11 @@ h1 {
   margin: 0;
   /* Near-white type at weight 300 over a sunlit cloud top is the worst case
      on this page — thin strokes, and a backdrop that can be brighter than the
-     ink. The old single soft glow was lift, not contrast, and the wordmark
-     disappeared into a bright reel frame.
+     ink. A single soft glow is lift, not contrast, and the wordmark
+     disappears into a bright reel frame under it.
      Three layers, all in em so they scale with the clamp: a hairline contact
-     shadow, a tight halo hugging the strokes, and the soft lift that was here
-     before at half strength. Proportionally this is the same treatment
+     shadow, a tight halo hugging the strokes, and a soft lift at half
+     strength. Proportionally this is the same treatment
      .rail-head gets at 11px — nothing wider than 0.18em, so the shadow only
      ever appears where a letter is standing on it rather than pooling in the
      tracking. */
@@ -277,9 +274,9 @@ h1 {
    gets out of its way — no movement, only a fade, because the wordmark
    shifting under the cursor read as a twitch. The hovered case is the one
    exception: it stays at full strength so you know what you are looking at.
-   Harder than the 0.2 this page used to fade to: the point of the layout is
-   to see the domain, and at 0.2 the chrome is still a page with a picture
-   behind it rather than the picture. */
+   Harder than a fade to 0.2: the point of the layout is to see the domain,
+   and at 0.2 the chrome is still a page with a picture behind it rather
+   than the picture. */
 body.previewing .strip,
 body.previewing .rail-head,
 body.previewing .readout,
@@ -338,10 +335,9 @@ body.previewing .hero { opacity: 0; }
    an interaction, and it gets the .3s reveal below instead.
 
    Durations and delays across the whole sequence — strip, h1, tag, own,
-   modes, cases — are half what they were (Thomas, 2026-08-22). Halved
-   together, so the stagger still reads as one cascade rather than as six
-   things that happen to move. main.js's teardown timer is halved with
-   them; it has to outlast the last one. */
+   modes, cases — are short, and scaled together, so the stagger still reads
+   as one cascade rather than as six things that happen to move. main.js's
+   teardown timer is scaled with them; it has to outlast the last one. */
 body.intro .own { animation: fade 0.7s 0.425s both; }
 /* hidden must beat display:flex, and does not on its own. */
 .own[hidden] { display: none; }
@@ -389,7 +385,7 @@ body.intro .own { animation: fade 0.7s 0.425s both; }
    two-line button (label over caution) reads the same as the one-line ones.
    Out of flow is what lets the LABEL stay centred in the whole button — an
    arrow in the flex row shifts the words right of centre and needs a hidden
-   mirror on the right to answer it, which is what this used to be. */
+   mirror on the right to answer it. */
 .own::before {
   content: '▸'; color: var(--amber);
   position: absolute;
@@ -472,10 +468,10 @@ body.intro .modes { animation: fade 0.7s 0.5s both; }
    Cyberpunk is basic's page with a city under it, so it takes every rule
    here: the same two buttons, no rail, no upload.
 
-   It has to GET there rather than appear there. The first cut switched
-   grid-template-columns between two tracks and one, which is a discrete
-   change — the wordmark teleported a hundred and eighty pixels the instant
-   the toggle was clicked, and the eye reads a jump as a glitch rather than as
+   It has to GET there rather than appear there. Switching
+   grid-template-columns between two tracks and one is a discrete
+   change — the wordmark teleports a hundred and eighty pixels the instant
+   the toggle is clicked, and the eye reads a jump as a glitch rather than as
    a layout.
 
    Animating grid-template-columns directly does not work: the two values have
@@ -492,11 +488,11 @@ body.intro .modes { animation: fade 0.7s 0.5s both; }
 
    Both transitions are scoped to body.switched — the class applyMode adds for
    a click and not for a page load — because the glide is the answer to "where
-   did the rail go", and on load there was no question. The body has no mode
+   did the rail go", and on load there is no question. The body has no mode
    class for the first instant of a load, which is the research layout, so a
-   transitioned collapse meant every basic-mode page load began with the
-   wordmark sliding in from the right as though the reader had just switched
-   (Thomas, 2026-08-22). Unscoped it cannot be fixed by ordering: the class
+   transitioned collapse would begin every basic-mode page load with the
+   wordmark sliding in from the right as though the reader had just switched.
+   Unscoped it cannot be fixed by ordering: the class
    lands before the first paint, and a transition fires on the change whenever
    it lands. */
 
@@ -589,10 +585,10 @@ body.intro .cases { animation: fade 0.8s 0.55s both; }
   margin: 0 0 0.6rem;
 }
 /* The group rule is the panel head's amber rule run out to the edge — the
-   same signal doing the same job one level up. Brought up with the label: at
-   0.55 it was a hairline of orange on cloud and read as an artifact. No
+   same signal doing the same job one level up. As strong as the label: at
+   0.55 it is a hairline of orange on cloud and reads as an artifact. No
    shadow under it — a 3px blurred dark band beneath a 1px line is thicker
-   than the line, so it read as a second, smudged rule rather than as lift. */
+   than the line, so it reads as a second, smudged rule rather than as lift. */
 .rail-head .rule {
   flex: 1; height: 1px;
   background: var(--amber);
@@ -667,7 +663,7 @@ body.intro .cases { animation: fade 0.8s 0.55s both; }
      is the thing with room to take a second line. */
   min-width: 0;
 }
-/* The horizontal grid spacing, in the corner the download size used to have.
+/* The horizontal grid spacing, in the corner, rather than the download size.
    A file size tells you how long you will wait; the resolution tells you what
    you are about to fly through, and only one of those is worth a corner.
    Never broken across lines: "100" over "m" is not a number, and this is the
@@ -752,9 +748,9 @@ body.intro .cases { animation: fade 0.8s 0.55s both; }
 }
 .demo .note { color: var(--dim); }
 /* Bare, and heavier and larger than the line it introduces — the weight is
-   the whole signal now that there is no box around it. Boxed, it was a
+   the whole signal with no box around it. Boxed, it would be a
    14 px square holding an 11 px glyph and read as small print about small
-   print (Thomas, 2026-08-15). flex: none so it never gets squeezed by a
+   print. flex: none so it never gets squeezed by a
    long first word. */
 .demo .warn::before, .own .warn::before {
   content: '!';

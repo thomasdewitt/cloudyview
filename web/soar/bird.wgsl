@@ -90,7 +90,7 @@ const OCCLUSION_STEPS: i32 = 16;
 const RACHIS_V: f32 = 0.38;
 
 // ---------------------------------------------------------------------------
-// Shared-convention helpers (duplicated from raymarch.wgsl; keep in sync)
+// Shared-convention helpers (duplicated from the shader's volume.wgsl; keep in sync)
 // ---------------------------------------------------------------------------
 
 fn ray_box(origin: vec3<f32>, inv_dir: vec3<f32>) -> vec2<f32> {

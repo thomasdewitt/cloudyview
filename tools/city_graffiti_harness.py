@@ -1,4 +1,4 @@
-"""The city's graffiti (raymarch.wgsl, CITY GRAFFITI) on a flat test wall,
+"""The city's graffiti (city/graffiti.wgsl) on a flat test wall,
 and the measurements its far mean stands on.
 
 The section is lifted from the shader with the three hashes it calls and

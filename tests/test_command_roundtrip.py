@@ -1,7 +1,7 @@
 """The browser's copy-command output must parse in the CLI, always.
 
-The standing goal (Thomas, 2026-08-22): *"the 'render in terminal' option can
-actually reproduce the view, always."* Two halves make that true. The loader
+The standing goal: the "render in terminal" option can actually reproduce
+the view, always. Two halves make that true. The loader
 mirror in io.py handles files the browser resolved silently; for everything
 the browser inferred or ASKED — variables, axis assignment, coordinate names,
 units, timestep, an attached ice file — `viewer._selectionFlags` writes the

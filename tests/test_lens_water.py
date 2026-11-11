@@ -1,4 +1,4 @@
-"""Lens water's state (raymarch.wgsl fs_lens_state) and its dry contract.
+"""Lens water's state (passes.wgsl fs_lens_state) and its dry contract.
 
 The wetness a replay draws must not depend on how its frames split the
 time: the browser's video export and `soar TRACK.json` both step the state
@@ -19,7 +19,7 @@ try:
 except ImportError:
     from conftest import SOAR_DATA_FILE, build_soar_level, soar_gpu_adapter
 
-# raymarch.wgsl's lens-water constants.
+# The shader's lens-water constants (passes.wgsl).
 L_WET, K_WET, K_DRY, K_DRY_CLEAR, DRY_FLOOR = 30.0, 0.6, 0.2, 0.6, 0.002
 SIGMA = 0.0625           # m^-1: exact in half and single float
 

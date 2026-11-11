@@ -2,7 +2,7 @@
 
 A file with three levels should offer all three of its pairs — coarse+middle,
 coarse+fine, middle+fine — and one did not: only its finest pair came back
-(Thomas, 2026-08-14, on a turbulon `sq1km` run with parent + nest_a + nest_b).
+(on a turbulon `sq1km` run with parent + nest_a + nest_b).
 
 The cause was the containment tolerance. Both boxes are built from cell EDGES,
 so a nest can sit proud of its parent for no reason but the grid, and the

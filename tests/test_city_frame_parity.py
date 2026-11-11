@@ -7,13 +7,14 @@ it back into world metres. All of them have to be the SAME map as the one the
 shader samples the tile with, or the marker sits on a district the picture
 does not show.
 
-The shader's map is one line of raymarch.wgsl:
+The shader's map is one line of city/layout.wgsl:
 
     let uv = xy / u.tile_extent;
 
-where `xy` is the CITY FRAME — world minus the row-24 surface offset, folded
-into the tile (city_camera_origin) — and the sampler repeats, so only the
-fractional part of uv picks a block. The row-24 offset is cam - sp for a
+where `xy` is the CITY FRAME — world minus the surface offset
+(u.surface_offset), folded into the tile (city_camera_origin) — and the
+sampler repeats, so only the
+fractional part of uv picks a block. The surface offset is cam - sp for a
 flying camera and the static cityOffsetM folded for every static render, and
 in BOTH cases it is congruent to cityOffsetM mod the tile wherever a tile
 position is quoted (the camera's own surfacePosition derives against the
@@ -56,9 +57,9 @@ EXTENT = 46080.0
 def test_shader_samples_the_tile_at_the_city_frame_over_extent():
     """The definition, as it stands in the shader.
 
-    Since the tile-periodic city (row 24, 2026-09-01), the glow's uv is a
+    The glow's uv is a
     plain read of the city frame — xy / extent — and the frame itself is
-    world minus the row-24 offset (city_camera_origin). The offset is
+    world minus u.surface_offset (city_camera_origin). The offset is
     congruent to cityOffsetM mod the tile in every context that quotes a
     tile position, so the composite world->tile map is unchanged:
     fract((world - cityOffsetM) / extent). See the module docstring; a
@@ -138,7 +139,7 @@ def test_harness_city_camera_inverts_the_forward_map():
 # GPU in WGSL, so the constants are written down twice; these pin the second
 # copy to the first.
 
-# (JS name in minimap.js, WGSL name in raymarch.wgsl)
+# (JS name in minimap.js, WGSL name in city/layout.wgsl)
 _CITY_MAP_CONSTANTS = [
     ("CITY_MAP_EMPTY_RANK", "CITY_EMPTY_RANK"),
     ("CITY_MAP_SPRAWL_RANK_FULL", "CITY_SPRAWL_RANK_FULL"),

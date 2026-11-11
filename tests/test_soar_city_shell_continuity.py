@@ -300,7 +300,7 @@ def _view(cam, width):
 
 def _plain(r, width, height):
     """The plain pass's target as raw words: red carries the shell's mark
-    (its sign bit, CITY_SHELL_MARK in raymarch.wgsl), alpha the distance
+    (its sign bit, CITY_SHELL_MARK in the shader), alpha the distance
     (negated where the street stage's ground flag is set)."""
     import wgpu
     tex = r._targets["plain"]
@@ -429,7 +429,7 @@ def test_shell_equals_flat_where_it_hands_off(view_name, city):
 # the wall, which the shell left off its reveals and sills: each jamb was a
 # dark sliver in a band that clipped to white, there while the shell drew it
 # and gone when it handed over ("the window sides appear and disappear",
-# Thomas, on the building with the white first floor). Laying the band on
+# on the building with the white first floor). Laying the band on
 # every surface instead cured the flicker and left a featureless white wall.
 # Two things are held here, up close: the shell's ground floor averages to
 # what the flat facade shows there, and its frames and mullions stay

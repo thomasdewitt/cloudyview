@@ -272,14 +272,13 @@ export const autotier = {
       `at ${this.canvas.width}x${this.canvas.height} (${clock} clock)`);
     // The verdict, said out loud — once, here, whatever the mode.
     //
-    // This was retired on the reasoning that the probe's answer is
-    // provisional and the governor announces the settled one (Thomas,
-    // 2026-08-20). The governor only ever speaks when it MOVES, and
+    // The probe's answer is provisional and the governor announces the
+    // settled one, but the governor only ever speaks when it MOVES, and
     // QUALITY_TIERS_CHEAPEST_FIRST tops out at High: a machine that probes
-    // straight to High has no rung left to climb, so it moves never and said
-    // nothing at all — no message about quality on the whole flight, on
-    // exactly the hardware most likely to be flying. Announcing the verdict
-    // costs one toast and restores the invariant that the tier is never
+    // straight to High has no rung left to climb, so it never moves and
+    // would say nothing at all — no message about quality on the whole
+    // flight, on exactly the hardware most likely to be flying. Announcing
+    // the verdict costs one toast and restores the invariant that the tier is never
     // changed silently, which the governor's own two toasts assume.
     //
     // The floor's old "expect a slideshow" stays retired: that was a

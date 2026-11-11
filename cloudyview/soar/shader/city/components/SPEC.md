@@ -31,26 +31,27 @@ hook dispatchers in `dispatch.wgsl`.
    light is `CITY_SKYGLOW` and `CITY_MOONLIGHT`. Emission carries the look;
    albedo-lit surfaces are near-black at night. Stay in that world.
 
-   **Vibe targets (Thomas, 2026-08-20).** *Cloudpunk* is the closest
+   **Vibe targets.** *Cloudpunk* is the closest
    reference for what this city is — layered neon verticality, air traffic,
    glowing signage — minus its voxel-art construction. *Stray* is the bar
    for solidity — its streets feel inhabited and physically real — but a
    notch dirtier than we want; this city is lived-in, not derelict. Unlike
    Cloudpunk we have a real ground: street-level life and ground cars.
-   No air traffic: the flying cars were tried and removed (Thomas,
-   2026-11: *"For the flying cars, I recommend just getting rid of them
-   wholesale."*).
+   No air traffic: no flying cars.
 
-   **Detail calibration (Thomas, and it applies to ALL detail, not just
+   **Detail calibration (it applies to ALL detail, not just
    vehicles): wiper-blades-level, not tire-brand-name-level.** Distinct
    functional features — seams, housings, fittings, hardware — never
    micro-text, logos, or ornament below the functional scale.
 
 ## What the core gives you
 
-Read raymarch.wgsl's city section. You may CALL any core `city_*` /
-`pcg2d` / `hash*` function and read any `CITY_*` const and `u.*` uniform;
-you may not redefine them. The structs you exchange with the core:
+Read the core city files in `..`: `layout.wgsl` (the cell, its hashes and
+`city_box_hit`), `facade.wgsl` (the facade shell), `windows.wgsl`,
+`street.wgsl`, `shade.wgsl` (`city_shade`) and `passes.wgsl`. You may CALL
+any core `city_*` / `pcg2d` / `hash*` function (`pcg2d` is in
+`../../math.wgsl`) and read any `CITY_*` const and `u.*` uniform; you may
+not redefine them. The structs you exchange with the core:
 
 - `CityCell` — everything about one block: `built`, `density`, `rank`,
   `height`, `plot_min/max`, tier boxes `b1min..b3max`, `seed: vec2<u32>`,
@@ -167,7 +168,7 @@ Signatures:
   rgb. `rnd` is a per-pixel independent (white) uniform per frame, for
   jittering a march.
 
-## The street (core section THE STREET SURFACE)
+## The street (core: `../street.wgsl`, THE STREET SURFACE)
 
 The ground is a cross-section around each plot: sidewalk (`CITY_SIDEWALK_W`,
 `_AVE` on avenues), kerb (`CITY_KERB_H` high), gutter, parking lane, travel
@@ -192,7 +193,7 @@ window hooks do, because the reflected hit is shaded by `city_shade`.
 ## The facade shell (core)
 
 Up close a building face is not a box face: the core traces it as a SHELL
-(raymarch.wgsl, "Facade shell"), in the city's second surface stage
+(`../facade.wgsl`, "Facade shell"), in the city's second surface stage
 (`fs_surface_refine`) — recessed windows with the glass set back, sills,
 hoods, ledges, cornices, fins and mullion caps, AC units, drainpipes on
 brackets, rain canopies, balconies, fire escapes, and an interior-mapped
@@ -221,8 +222,8 @@ room behind every lit pane. What that means for a component:
 ## Detailed micro-geometry: the SDF-in-a-box pattern
 
 Props that the camera can get close to (vehicles, street furniture) should
-NOT be bare boxes — Thomas: the micro details should be *very highly
-detailed*, and the budget genuinely allows it. The calibration (his):
+NOT be bare boxes — the micro details should be *very highly
+detailed*, and the budget genuinely allows it. The calibration:
 **wiper-blades-level detail, not tire-brand-name-level** — distinct
 functional features (blades, door seams, intakes, antennae, light
 housings, panel lines), no micro-text or logos. The pattern:
@@ -248,12 +249,10 @@ Cost honesty: only pixels whose rays enter a prop's bounding box pay for
 EXECUTING the SDF — but every pixel pays for its REGISTER PRESSURE. The
 city and the clouds share one kernel, and a big unrolled SDF (the classic
 offender: four inline copies of the field for a 4-tap gradient) collapses
-occupancy for the whole frame even when no prop is in view — the flying
-cars' refit (a component since removed) measured +65% on craft-free
-vistas from exactly this, fixed pixel-identically by rolling the gradient
-taps into a loop. Keep your SDF
-in ONE function, roll your gradient taps, and A/B a prop-free vista, not
-just your close-up.
+occupancy for the whole frame even when no prop is in view — measured at
++65% on a prop-free vista from exactly this, and removed pixel-identically
+by rolling the gradient taps into a loop. Keep your SDF in ONE function,
+roll your gradient taps, and A/B a prop-free vista, not just your close-up.
 
 ## Iterating on your look
 

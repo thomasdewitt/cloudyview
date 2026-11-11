@@ -31,7 +31,7 @@ teeth 5 cm taller, 1,862. Its first run found a renderer bug, not a mirror
 one: the freeway deck's fascia and its rails' outer faces were not drawn
 from outside the corridor (skyway.wgsl, cc_skyway_route).
 
-Skips without node or a real GPU adapter. Run it through tools/gpulock.
+Skips without node or a real GPU adapter.
 """
 
 import json
@@ -349,7 +349,7 @@ def _check_view(dirs, t_gpu, kind, origin, pixel_angle, rng):
 
 def test_every_mirrored_constant_is_the_shaders():
     """cityprops.js mirrors its constants by name, CITY_ (the core's) and
-    cc_<component>_ (the composed components' in raymarch.wgsl)."""
+    cc_<component>_ (the components' own, in city/components/)."""
     import re
     pat = r"^const\s+((?:CITY|cc)_\w+)\s*:\s*(?:f32|i32)\s*=\s*([-\d.eE+]+)\s*;"
     wgsl = {m.group(1): float(m.group(2))

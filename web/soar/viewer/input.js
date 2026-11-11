@@ -60,11 +60,11 @@ export const input = {
         // Holding the pointer IS flying — enforced here as an invariant
         // rather than trusted to every path that can ask for the lock.
         // Without it, anything that leaves "paused, menu closed, mouse free"
-        // (a screenshot closes the menu with no resume — bug 2's sibling;
+        // (a screenshot closes the menu with no resume;
         // app switching can drop and re-grant the lock) lets the next click
         // capture the pointer while paused: the view still pans, because
         // look() is deliberately not gated on pause, but WASD, the bird's
-        // clock and the recorder are all frozen. Observed live 2026-08-11.
+        // clock and the recorder are all frozen.
         if (this.paused) {
           this.ui.close();
           this.paused = false;
@@ -164,8 +164,8 @@ export const input = {
     // in the switch below either opens a panel the tutorial is not expecting
     // (P/F12 onto capture, R's track panel once a recording stops) or cycles
     // state a later prompt was written against, and the tutorial's menu is
-    // already inert to clicks — a shortcut past it stranded the reader with
-    // only Skip live (Thomas, 2026-08-22). Refused at the source, with the
+    // already inert to clicks — a shortcut past it would strand the reader
+    // with only Skip live. Refused at the source, with the
     // prompt's own "not yet" note; the flight keys below the switch — WASD,
     // Space, Shift — and the wheel are untouched, as is every key here the
     // moment the tutorial ends.
@@ -229,7 +229,7 @@ export const input = {
       case "k": if (this.ui.allows("quality")) this.toggleLightCache(); return;
       // Through pause(), not ui.open() directly: the dialog needs the mouse,
       // so the pointer must be released first — opening it under a held lock
-      // left the camera turning behind an unusable panel (bug 1).
+      // leaves the camera turning behind an unusable panel.
       //
       // P is the binding; F12 stays a silent alias because it was the one
       // people learned, and because the browser's own F12 is a devtools key

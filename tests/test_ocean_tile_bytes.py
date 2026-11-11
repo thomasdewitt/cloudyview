@@ -1,6 +1,6 @@
 """The shader's numbers about the sea tile, held to the tile's bytes.
 
-raymarch.wgsl carries two facts measured from cloudyview/soar/ocean/: the
+The shader (ocean.wgsl) carries two facts measured from cloudyview/soar/ocean/: the
 slope variance each mip level removed (fif_slope_variance — the glint lobe
 hands it back), and the bound its two normalize() calls rest on (the
 @domain notes: every texel's normal has z >= 0.923). Neither is derived at

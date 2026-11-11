@@ -17,7 +17,7 @@ Two products per demo, both written to web/soar/demos/<id>/:
 
   still.webp
       One converged ground-level frame for the landing page, rendered with
-      witness — which is now the same shader the browser runs, so the preview
+      witness — which is the same shader the browser runs, so the preview
       is the thing itself rather than an impression of it.
 
     uv run python tools/prebake_demos.py            # everything
@@ -67,11 +67,10 @@ from export_web_assets import _volume_aabb
 # Haze is a function of the quality tier in the app, so the still takes the
 # max tier's: a capture at a named tier is the pure preset and takes
 # DEFAULT_HAZE_BY_TIER's value (web/soar/constants.js; max is a 70 km
-# sea-level e-folding, retuned 2026-08-18), and a flight at max or high opens
-# at that same haze. Thomas, 2026-11-09, of a still baked at 0.55: "It should
-# be rendered at max which has rather little haze right?" Restated because
-# Python cannot import that ES module; tests/test_soar_meter_grid.py pins the
-# two equal.
+# sea-level e-folding), and a flight at max or high opens at that same haze,
+# so a still is rendered with max's little haze, not a hazier default.
+# Restated because Python cannot import that ES module;
+# tests/test_soar_meter_grid.py pins the two equal.
 MAX_TIER_HAZE = -0.0380
 
 LOOK_DEFAULTS = {
@@ -86,7 +85,7 @@ LOOK_DEFAULTS = {
     "lod": DEFAULT_LOD_STRENGTH,
     # Same, for the haze profile. A demo whose framing was chosen under the
     # exponential atmosphere says so here rather than inheriting whatever the
-    # app defaults to this month.
+    # app defaults to.
     "haze_height_dependent": DEFAULT_HAZE_HEIGHT_DEPENDENT,
 }
 _LOOK_ARG = {"exposure": "exposure", "gamma": "tone_map_gamma",
@@ -103,7 +102,7 @@ OUT = REPO / "web" / "soar" / "demos"
 # under data/demos would be a second thing to keep in step with
 # generate_demo_fields.py. A spec names its own source with `src`.
 #
-# Sibling layout, which is the convention on both of Thomas's machines
+# Sibling layout, which is the convention on the machines this runs on
 # (~/code-and-data/<repo>). If the path is wrong the netCDF open fails and
 # says so — there is nothing here to fall back to.
 STEAM_SRC = REPO.parent / "turbulon-model" / "demos" / "fields"
@@ -122,8 +121,8 @@ RCEMIP_SRC = Path("/Volumes/BLUE/STEAM visuals and demos/RCEMIP LES comparison")
 # viewer renders as a placeholder rather than an empty row.
 # Order here is the order on the page. STEAM leads: it is the model this work
 # is for, and the LES cases are the comparison rather than the headline —
-# which means the first thing on the landing page is currently a "coming soon"
-# strip, deliberately (Thomas, 2026-08-14).
+# which means the first thing on the landing page may be a "coming soon"
+# strip, deliberately.
 GROUPS = [
     # STEAM is the cascade/turbulon model. Its fields carry nested refinements
     # (r0/r1/r2 in one file), so a demo here will eventually need a per-level
@@ -138,23 +137,23 @@ GROUPS = [
 # to the occupied range plus headroom; empty sky costs the same per voxel as
 # a cumulus tower and renders to nothing.
 #
-# `still` is the framing AND the look of the preview, and since 2026-08-14 it
+# `still` is the framing AND the look of the preview, and it
 # is also where the flight starts: the viewer reads the camera back out of
 # meta.json and opens there, so clicking a case puts you exactly where the
 # picture you clicked was taken from. Anything omitted falls back to the
 # defaults in render_still.
 #
-# These blocks come from Thomas flying the app and copying the reproduction
+# These blocks come from flying the app and copying the reproduction
 # command out of the terminal-render panel, which is why the numbers have
-# twelve decimal places — they are a camera he stopped at, not a camera
+# twelve decimal places — they are a camera someone stopped at, not a camera
 # anybody typed. `sun` moved with them for the same reason: it is the light
-# he chose the view under, and the still and the flight have to agree about
+# the view was chosen under, and the still and the flight have to agree about
 # it or entering flight is a jump cut.
 #
 # The one sanctioned exception to that agreement is not here at all: the app
 # raises a low sun before it opens flight, because a sun a few degrees above
 # the horizon makes every ray march a long way through the haze and a sunset
-# opens SLOW (Thomas, 2026-09-01: "sunsets are much slower to fly"). That is
+# opens SLOW. That is
 # one rule in constants.js rather than a key per demo — see
 # MIN_START_SUN_ELEVATION — so a `sun` here is always simply the light the
 # still was made under, and a future sunset case inherits the behaviour
@@ -164,13 +163,12 @@ GROUPS = [
 # is opened by a hover:
 #
 #   description   What this case IS, when the title and the regime line do not
-#                 already say it. The LES cases had one each and they have
-#                 been dropped: "the nocturnal stratocumulus deck off the
-#                 California coast" told a reader nothing that "SAM DYCOMS /
-#                 Marine stratocumulus" and the still behind the page had not
-#                 already (Thomas, 2026-08-15). Write one when a case would
-#                 otherwise be a mystery — a STEAM cascade with a particular
-#                 set of parameters is the likely first customer.
+#                 already say it. The LES cases have none: "the nocturnal
+#                 stratocumulus deck off the California coast" tells a reader
+#                 nothing that "SAM DYCOMS / Marine stratocumulus" and the
+#                 still behind the page do not already. Write one when a case
+#                 would otherwise be a mystery — a STEAM cascade with a
+#                 particular set of parameters is the likely first customer.
 #
 #   warning       What will go wrong before it goes wrong. Reserved for a real
 #                 cost to the person clicking; it is set in red on the card and
@@ -181,22 +179,20 @@ DEMOS = [
     # Read straight out of turbulon-model rather than copied into data/demos:
     # see STEAM_SRC. Both are periodic — they are cascade fields on their own
     # root domain, not crops out of a larger run, so the wrap is the field's
-    # own (Thomas, 2026-08-15) and `periodic` stays at its default.
+    # own and `periodic` stays at its default.
     #
     # z="auto" rather than a typed range: the browser and witness both trim
     # empty planes before rendering, so the domain box a camera is normalized
     # against IS the occupied band. See occupied_z_band.
     dict(
-        # Named for the sky, not the ground (Thomas, 2026-11-09: once the
-        # desert ground left, "desert" named something it no longer stood on).
+        # Named for the sky, not the ground: it stands on the sea.
         id="utah-convection",
         group="steam",
         title="STEAM high-based convection",
         field="Utah summer cumulus congestus",
         warning="Needs a highly capable GPU",
-        # High-based summer convection, a desert sky. It stood on the desert
-        # ground 2026-09-23 .. 11-09; the desert left this line, and it stands
-        # on the sea again (Thomas: "Same clouds, over sea").
+        # High-based summer convection, a desert sky, over the sea. The
+        # source files keep their desert names.
         liquid=("demo_desert-convection.nc", "qc"),
         ice=("demo_desert-convection.nc", "qi"),
         src=STEAM_SRC,
@@ -229,10 +225,10 @@ DEMOS = [
         crop=dict(y=(0, 512), x=(0, 512), z="auto"),
         scale=1e3,
         sun=dict(azimuth=0.0, elevation=45.5),
-        # This one starts where the tutorial starts, and the still is that view
-        # (Thomas, 2026-08-22). It is the demo the landing page's "less
+        # This one starts where the tutorial starts, and the still is that
+        # view. It is the demo the landing page's "less
         # detailed" button loads and so the one a first flight lands in, and
-        # FlyThroughApp.tutorialSpawn puts the camera on the water looking at
+        # the viewer's tutorialSpawn puts the camera on the water looking at
         # the horizon — the picture you clicked has to be the place you arrive,
         # tutorial or no tutorial, or entering flight is a jump cut.
         #
@@ -297,16 +293,15 @@ DEMOS = [
         # give a mean of ratios where the field wants a ratio of means.
         coarsen=2,
         scale=1e3,
-        # Reframed 2026-09-01, and the fine case above deliberately KEPT its
-        # midday view (Thomas: "Happy with the full res one"). The two used
-        # to share a camera so the cards read as a before/after of one world
-        # at two resolutions; they no longer do, and the comparison now lives
-        # in the description line rather than in the pictures.
+        # Framed apart from the fine case above, which keeps its midday
+        # view: the two do not share a camera, so the comparison between
+        # the resolutions lives in the description line rather than in the
+        # pictures.
         #
         # This is a sunset: 4.5 degrees of sun elevation, against 51.5 above.
         sun=dict(azimuth=17.0, elevation=4.5),
         still=dict(
-            # Thomas's aspect, reduced by the same factor on both axes
+            # The flown window's aspect, reduced by the same factor on both axes
             # (2548x1464 = 4 x 637x366, this is 3 x 637x366) so the doubled
             # output lands at 3822x2196 rather than 5096x2928. Identical
             # framing — the projection reads the ratio — at the ~4K width the
@@ -344,19 +339,18 @@ DEMOS = [
         title="SAM TWP-ICE",
         field="Tropical deep convection",
         # No warning here despite being the largest of the LES set: it is
-        # 432 MB of texture and flies fine in practice. The warning moved to
+        # 432 MB of texture and flies fine in practice. The warning is on
         # the STEAM cases, which are the ones that actually hurt — 1.2 to
-        # 4.2 GB (Thomas, 2026-08-15: "TWPICE is not GPU-difficult but all
-        # the steam runs are").
+        # 4.2 GB.
         liquid=("TWPICE_LPT_3D_QC_0000003450.nc", "QC"),
         ice=("TWPICE_LPT_3D_QI_0000003450.nc", "QI"),
         dims="yxz",
         crop=dict(y=(0, 1024), x=(1024, 2048), z=(0, 206)),
         scale=1.0,                       # already g/kg
-        sun=dict(azimuth=235.0, elevation=70.0),   # zenith ~20 (Thomas, 2026-08-11)
+        sun=dict(azimuth=235.0, elevation=70.0),   # zenith ~20
         # The one case that does not tile. It is a 102 km crop out of a larger
         # run rather than a periodic box, and wrapping it repeats a squall
-        # line that has no business repeating (Thomas, 2026-08-14).
+        # line that has no business repeating.
         periodic=False,
         still=dict(
             size=(1920, 963),
@@ -427,9 +421,8 @@ DEMOS = [
         crop=dict(y=(0, 480), x=(0, 480), z="auto"),
         scale=1.0,                       # QN units attribute says g/kg
         sun=dict(azimuth=20.0, elevation=55.0),
-        # Thomas's framing, flown 2026-08-31. The exposure that came back with
-        # it was metered against a field that counted QN as both phases, so it
-        # does not transfer to this bake and the meter is asked again.
+        # A flown framing; the exposure is metered here, as on every fresh
+        # bake, rather than copied from the flight.
         still=dict(
             size=(1920, 961),
             position=(0.573153097861, -0.509558749967, -0.998447204969),
@@ -451,7 +444,7 @@ DEMOS = [
         crop=dict(y=(0, 504), x=(0, 504), z="auto"),
         scale=1e3,                       # kg/kg -> g/kg
         sun=dict(azimuth=20.0, elevation=55.0),
-        # Thomas's framing, flown 2026-08-31, and the exposure metered here
+        # A flown framing, and the exposure metered here
         # for the same reason it is on every fresh bake.
         still=dict(
             size=(1920, 961),
@@ -460,10 +453,9 @@ DEMOS = [
             exposure="auto",
         ),
     ),
-    # The FIF cascade was shipped here until 2026-08-08 and was dropped: it is
-    # not a fluid-dynamics simulation, and the synthetic slot on the rail now
-    # belongs to STEAM. Its source field stays in data/demos/, so restoring it
-    # is a spec here plus a bake.
+    # No FIF cascade: it is not a fluid-dynamics simulation, and the
+    # synthetic slot on the rail belongs to STEAM. Its source field stays in
+    # data/demos/, so adding it is a spec here plus a bake.
 ]
 
 # --- loading ---------------------------------------------------------------
@@ -629,8 +621,8 @@ def occupied_z_band(spec: dict, slab: int = 256) -> tuple:
     Why this is computed rather than typed. A camera position in soar is
     normalized to the domain box, and BOTH the browser's ingest and witness
     trim empty z planes before rendering — so the box a flight is placed in is
-    the occupied band, not the file's z extent. Thomas flies a raw netCDF,
-    copies the reproduction command, and that camera means "relative to the
+    the occupied band, not the file's z extent. A raw netCDF is flown, the
+    reproduction command copied, and that camera means "relative to the
     band". If the bake then ships a volume cut anywhere else, the still and
     the flight are two different scenes and entering flight is a jump cut.
 
@@ -825,7 +817,8 @@ def bake_volume(spec: dict, field: CloudField, out: Path) -> dict:
 # uint8, not fp16. The fraction is a [0, 1] quantity read only through a
 # color ramp and a condensate readout, so 1/255 steps are invisible, and at
 # demo sizes the halving is real money — 1.6 GB rather than 3.2 GB of texture
-# for the desert field, on top of the extinction volume it sits beside. Both
+# for the utah-convection field, on top of the extinction volume it sits
+# beside. Both
 # the demo bake and the browser's own ingest quantize the same way (see
 # ingest/worker.js), so a field flown as a demo and the same field opened as
 # a NetCDF give the same picture.
@@ -873,7 +866,7 @@ def bake_ice(spec: dict, field: CloudField, meta: dict, out: Path) -> dict:
             "Re-bake the volume too.")
 
     # Slabbed over x so the float64 ratio never exists for the whole field:
-    # the desert case is 2048 x 2048 x 385, which is 12.9 GB in float64 all
+    # utah-convection is 2048 x 2048 x 385, which is 12.9 GB in float64 all
     # at once and 0.8 GB a slab at a time. x is the slowest axis, so the
     # slabs concatenate into exactly the whole-array result.
     frac = np.empty(shape, dtype=np.uint8)
@@ -1008,9 +1001,8 @@ AE_RESPONSE = 0.5
 AE_LIMITS = (1.0, 4.0)
 # The meter's ray grid: the still's shape at about AE_METER_RAYS rays, the
 # browser's rule (uniforms.js meterSize, AUTO_EXPOSURE_METER_RAYS; pinned by
-# tests/test_soar_meter_grid.py). Until 2026-11-08 the two differed: this
-# metered 96 wide, and the browser a fixed 64x36 whatever the window's shape,
-# which only has square pixels at 16:9.
+# tests/test_soar_meter_grid.py). The grid takes the output's shape, because
+# a fixed 64x36 only has square pixels at 16:9.
 AE_METER_RAYS = 64 * 36
 
 
@@ -1027,14 +1019,12 @@ def auto_exposure(spec: dict, subject, view: dict,
                   white_point: float) -> float:
     """The exposure soar's auto-exposure would settle on for this view.
 
-    Metered rather than tuned, for every demo. The `still` blocks used to
-    carry numbers copied out of the app after AE had converged, and those
-    went stale the moment the renderer under them changed: after the
-    2026-09-01 physics fixes (one ice coefficient, the half-voxel
-    convention) every hand-copied still sat darker than the flight it opens
-    onto, by 3-61%. The same quantity arrived at by the same rule cannot
-    drift that way — and it is the only honest answer for a freshly baked
-    field, whose extinction no earlier hand-tuned number was chosen against.
+    Metered rather than tuned, for every demo. A number copied out of the
+    app after AE had converged goes stale the moment the renderer under it
+    changes, and the still then sits darker or brighter than the flight it
+    opens onto. The same quantity arrived at by the same rule cannot drift
+    that way — and it is the only honest answer for a freshly baked field,
+    whose extinction no earlier hand-tuned number was chosen against.
     """
     w, h = meter_size(view["size"])
     hdr = march(spec, subject, position=view["position"],
@@ -1082,10 +1072,11 @@ def render_still(spec: dict, subject, out: Path, size,
     azimuth = still.get("azimuth", (spec["sun"]["azimuth"] + 130.0) % 360.0)
     elevation = still.get("elevation", 20.0)
     fov = still.get("fov", 100.0)
-    # A per-demo size wins over --size, and it is given as the size Thomas
-    # framed at so the aspect is his; the multiplier is what makes it sharp on
-    # a 4K display. Framing is unchanged by the multiplier because the aspect
-    # ratio is, which is the only thing the projection cares about.
+    # A per-demo size wins over --size, and it is given as the size the
+    # view was framed at, so the aspect is the framing's; the multiplier is
+    # what makes it sharp on a 4K display. Framing is unchanged by the
+    # multiplier because the aspect ratio is, which is the only thing the
+    # projection cares about.
     if still.get("size"):
         size = (still["size"][0] * still.get("size_multiple", 2),
                 still["size"][1] * still.get("size_multiple", 2))
@@ -1094,7 +1085,7 @@ def render_still(spec: dict, subject, out: Path, size,
     # Resolved rather than sparse because these numbers are also the record of
     # how the picture was made — witness has to be able to reproduce it from
     # them alone, and "the rest were the defaults" is only a reproduction if
-    # you also know which day it was.
+    # you also know which defaults were in force.
     look = {**LOOK_DEFAULTS, **{k: still[k] for k in LOOK_DEFAULTS if k in still}}
     # exposure="auto" hands the number to the same meter the app uses rather
     # than to a value somebody read off a slider. A case whose extinction was
@@ -1131,7 +1122,7 @@ def render_still(spec: dict, subject, out: Path, size,
         # cwebp rather than ImageMagick: `magick -quality N -define
         # webp:method=6` was calling libwebp anyway, so this is the same
         # encoder with one less thing to have installed — and it is present
-        # on both of Thomas's machines, which magick is not. cwebp writes no
+        # on the machines this runs on, which magick is not. cwebp writes no
         # metadata, so there is nothing left to -strip.
         subprocess.run(["cwebp", "-quiet", "-q", str(quality), "-m", "6",
                         str(master), "-o", str(out / "still.webp")],

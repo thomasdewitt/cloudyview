@@ -1,12 +1,13 @@
 #!/usr/bin/env python
-"""Measure the night city's street-surface means for raymarch.wgsl.
+"""Measure the night city's street-surface means for the city shader.
 
-THE STREET SURFACE section of raymarch.wgsl shades the ground from a
-cross-section (sidewalk, kerb, gutter, lanes, markings) under the lamp pools,
-darkened where it is wet. Near the camera every term is resolved; far away the
-lamp term is replaced by its area mean, and that mean cannot be written down
-analytically: the pools pass through a knee, and they fall hardest on the
-sidewalk (the lamps stand on it), whose albedo is not the road's. So it is
+THE STREET SURFACE (cloudyview/soar/shader/city/street.wgsl) shades the
+ground from a cross-section (sidewalk, kerb, gutter, lanes, markings) under
+the lamp pools, darkened where it is wet. Near the camera every term is
+resolved; far away the lamp term is replaced by its area mean, and that mean
+cannot be written down analytically: the pools pass through a knee, and they
+fall hardest on the sidewalk (the lamps stand on it), whose albedo is not the
+road's. So it is
 measured here, by integrating the shader's own formulas over a block, and
 fitted as A s / (1 + B s) in the district lamp scale s:
 
@@ -35,7 +36,7 @@ from __future__ import annotations
 
 import numpy as np
 
-# --- constants, as raymarch.wgsl states them ---------------------------------
+# --- constants, as the shader states them ------------------------------------
 CELL = 90.0
 STREET_HALF = 6.0
 AVENUE_EXTRA = 10.0
@@ -101,7 +102,7 @@ def lamp_inset(k):
 
 
 def pcg2d(x, y):
-    """raymarch.wgsl pcg2d, in uint32 arithmetic."""
+    """The shader's pcg2d (math.wgsl), in uint32 arithmetic."""
     m = np.uint64(0xFFFFFFFF)
     x = np.asarray(x, np.uint64) & m
     y = np.asarray(y, np.uint64) & m
