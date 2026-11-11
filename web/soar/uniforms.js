@@ -26,6 +26,7 @@ export const SLOT = Object.freeze({
   CAM_FORWARD: 4,                 // row 1, xyz
   FRAME_INDEX: 4 * 4 + 3,
   DT_LIGHT: 6 * 4 + 3,
+  NEST_DT_LIGHT: 8 * 4 + 3,
   SCENE_CLOCK: 16 * 4 + 2,
   LENS_DT: 16 * 4 + 3,
   SUBPIXEL_JITTER: 17 * 4 + 2,

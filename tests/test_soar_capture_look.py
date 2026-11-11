@@ -103,7 +103,7 @@ _JS = textwrap.dedent("""
         (h) => autoExposureTarget(h, 15.0));
       const v = makeViewer();
       let metered = 0;
-      v.renderer = { ...v.renderer,
+      v.renderer = { ...v.renderer, finishLightBake: async () => {},
                      meterLuminance: async () => { metered += 1; return 30.0; } };
       const minimal = v._captureLook("minimal");
       out.minimalExposure = await v._meterCaptureExposure(minimal, [64, 36]);
@@ -123,7 +123,7 @@ _JS = textwrap.dedent("""
       const r = {
         flightRenderScale: 0.125, qualityTier: "minimal",
         lightCacheMode: "auto", parkedSppOverride: null,
-        lightBakePending: false,
+        finishLightBake: async () => {},
         setQualityTier(t) {           // the real one resets to flight stepping
           this.qualityTier = t;
           this.stepFactor = K.QUALITY_PRESETS[t].stepFactor;
@@ -188,6 +188,7 @@ _JS = textwrap.dedent("""
                  bmax: [1000, 1000, 1000], cityPosition: () => null,
                  surfacePeriod: 1638.4 },
         renderer: { periodic: true, cameraMoving: false,
+                    finishLightBake: async () => {},
                     meterLuminance: async (size, kw) => {
                       metered.push({ size, position: [...kw.camera.position],
                                      sceneTime: kw.sceneTime,

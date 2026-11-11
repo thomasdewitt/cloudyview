@@ -117,6 +117,9 @@ export const capturing = {
    */
   async _meterCaptureExposure(look, size, overrides = {}) {
     if (!look.meter) return look.exposure;
+    // The meter reads the light cache's sky visibility, so the cache is
+    // finished first: the exposure must not depend on how far a bake had got.
+    await this.renderer.finishLightBake();
     for (;;) {
       const highlight = await this.renderer.meterLuminance(
         size, { ...this._captureViewKwargs(look), ...overrides });

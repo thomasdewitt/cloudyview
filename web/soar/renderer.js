@@ -1590,14 +1590,7 @@ export class Renderer {
     // the event loop, so it is awaited rather than spun on; a failed compile
     // throws, and the session is put back the way it was before rethrowing.
     try {
-      while (this.lightBakePending) {
-        const compiling = this.bakePipelinePending();
-        if (compiling) {
-          await compiling;
-          continue;
-        }
-        this.stepLightBake(64);
-      }
+      await this.finishLightBake();
     } catch (err) {
       this.endOffline();
       throw err;
@@ -2123,7 +2116,13 @@ export class Renderer {
     // finest quadrature any tier would use — which also makes the cache
     // tier-independent: governor climbs, hold-ladder rungs and tier clicks
     // never stale it. Only the sun does.
-    u[SLOT.DT_LIGHT] = this.scene.minVoxelM * K.QUALITY_PRESETS.high.lightStepFactor;
+    // The bake steps at High's light step in both levels, whatever tier is
+    // flying, so the cache does not depend on when it was baked.
+    const lightStep = K.QUALITY_PRESETS.high.lightStepFactor;
+    u[SLOT.DT_LIGHT] = this.scene.minVoxelM * lightStep;
+    if (this.scene.nested) {
+      u[SLOT.NEST_DT_LIGHT] = this.scene.minVoxelNestM * lightStep;
+    }
     this._lightBake = {
       next: 0, cx, cy, cz, sliceTex, u,
       bindGroup: this._rayGroup("soar-light-bake", this._bakeUniformBuf),
@@ -2138,6 +2137,21 @@ export class Renderer {
   bakePipelinePending() {
     const pipeline = this._bakePipeline();
     return isPending(pipeline) ? pipeline : null;
+  }
+
+  /**
+   * Finish a bake that is in flight, now. A capture, and the metering of
+   * its exposure, must not read a cache that is half baked.
+   */
+  async finishLightBake() {
+    while (this.lightBakePending) {
+      const compiling = this.bakePipelinePending();
+      if (compiling) {
+        await compiling;
+        continue;
+      }
+      this.stepLightBake(64);
+    }
   }
 
   /** Bake up to `slices` planes; true when the cache became complete. */
@@ -2181,6 +2195,12 @@ export class Renderer {
       retireAfterSubmittedWork(this.device, b.sliceTex);
       this._lightBake = null;
       this._lightCacheReady = true;
+      // Frames averaged while the cache was filling read a sky visibility
+      // that was not all there yet (and, after a nest was removed or the
+      // domain's wrap changed, one baked for the field as it was). A tier
+      // that reads the sun from the cache restarts its average anyway when
+      // the method changes; Max never changes method, so restart here.
+      this._resetAccumulation();
       return true;
     }
     return false;
