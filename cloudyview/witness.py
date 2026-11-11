@@ -46,7 +46,8 @@ from .cli import (
     dataset_selection_kwargs,
 )
 from .field import CloudField, load as _load_field
-from .soar.look import AERIAL_SCALE_HEIGHT_M, DEFAULT_HAZE
+from .soar.look import (AERIAL_SCALE_HEIGHT_M, DEFAULT_HAZE, HAZE_MAX,
+                        HAZE_MIN)
 from .soar.renderer import STILL_ACCUMULATE_FRAMES, SoarRenderer
 from .soar.surfaces import (
     SURFACE_DIRS,
@@ -787,7 +788,7 @@ def cli():
     parser.add_argument("filename",
                         help="NetCDF file with cloud data")
     parser.add_argument("--output", "-o",
-                        help="Output directory")
+                        help="Output directory (default: current directory)")
     parser.add_argument("--camera-position", type=float, nargs=3,
                         metavar=('X', 'Y', 'Z'),
                         help="Camera position in relative coords (default: "
@@ -804,7 +805,8 @@ def cli():
                         help=f"Sun elevation in degrees (default: {DEFAULT_SUN_ELEVATION:g})")
     parser.add_argument("--size", type=int, nargs=2,
                         metavar=('WIDTH', 'HEIGHT'),
-                        help="Image size in pixels (overrides quality preset)")
+                        help=f"Image size in pixels (default: {DEFAULT_SIZE[0]} "
+                             f"{DEFAULT_SIZE[1]})")
     parser.add_argument("--exposure", type=float,
                         help="Tone-map exposure (linear pre-scale; default "
                              f"{DEFAULT_EXPOSURE}). "
@@ -819,7 +821,9 @@ def cli():
                         help="Display contrast about mid-grey, applied after the "
                              f"gamma encode (default: {DEFAULT_CONTRAST})")
     parser.add_argument("--haze", type=float,
-                        help=f"Aerosol amount, 0 to 2 (default: {DEFAULT_HAZE})")
+                        help="Aerosol amount, as soar's haze slider: "
+                             f"{HAZE_MIN:.2f} (clearest) to {HAZE_MAX} "
+                             f"(default: {DEFAULT_HAZE})")
     parser.add_argument("--haze-height-dependent",
                         action=argparse.BooleanOptionalAction, default=None,
                         help="Let the haze thin with height on a "

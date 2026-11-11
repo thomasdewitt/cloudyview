@@ -1,9 +1,10 @@
-"""The look's tuned constants: sun and sky colours, the haze curves, the
-ocean's knobs, and the model that reddens the light as the sun gets low.
+"""What the host computes of the look each frame: the haze curves, and the
+model that reddens the sun, sky and ambient light as the sun gets low.
 
-soar/uniforms.py packs these into the shader's uniform block. The browser has
-its own copies (web/soar/constants.js, web/soar/spectral.js), and tests hold
-the two together.
+soar/uniforms.py packs the results into the shader's uniform block. The
+look's fixed strengths are constants in the shader itself. The browser has
+its own copy of this file (web/soar/spectral.js and part of constants.js),
+and tests/test_uniform_parity.py holds the two together.
 """
 
 import math
@@ -25,23 +26,7 @@ ATMOSPHERE_AEROSOL_ANGSTROM = 1.3
 ATMOSPHERE_RGB_WAVELENGTHS_NM = (680.0, 550.0, 460.0)
 SUNSET_HORIZON_RADIANCE = (0.42, 0.20, 0.055)
 
-LOW_SUN_SKY_WARM_ELEVATION_DEG = 32.0
-LOW_SUN_SKY_HORIZON_AZIMUTH_DEG = 105.0
-LOW_SUN_SKY_UPPER_AZIMUTH_DEG = 45.0
-LOW_SUN_SKY_NEUTRAL_RADIANCE = (0.27, 0.30, 0.32)
-_LOW_SUN_SKY_MAX_WARM_DZ = math.sin(math.radians(
-    LOW_SUN_SKY_WARM_ELEVATION_DEG
-))
-_LOW_SUN_SKY_HORIZON_AZIMUTH_COS = math.cos(math.radians(
-    LOW_SUN_SKY_HORIZON_AZIMUTH_DEG
-))
-_LOW_SUN_SKY_UPPER_AZIMUTH_COS = math.cos(math.radians(
-    LOW_SUN_SKY_UPPER_AZIMUTH_DEG
-))
-
 LIGHT_TRANSFER_SPLIT_STRENGTH = 1.0
-LIGHT_TRANSFER_DIRECT_BOOST = 0.25
-LIGHT_TRANSFER_SHADOW_SKYLIGHT = 0.26
 LIGHT_TRANSFER_FULL_ELEVATION_DEG = 45.0
 LIGHT_TRANSFER_CUTOFF_ELEVATION_DEG = 55.0
 

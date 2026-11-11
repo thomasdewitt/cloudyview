@@ -9,7 +9,15 @@ class CloudyViewHelpFormatter(
     argparse.RawDescriptionHelpFormatter,
     argparse.ArgumentDefaultsHelpFormatter,
 ):
-    """Preserve section formatting while showing parser defaults."""
+    """Keeps the epilog's line breaks, and shows an option's default where
+    the parser has one. Most options default to None, meaning "the library's
+    default", which each help string states itself; for those nothing is
+    appended."""
+
+    def _get_help_string(self, action):
+        if action.default is None or action.default is False:
+            return action.help
+        return super()._get_help_string(action)
 
 
 DATA_SELECTION_HELP = dedent(

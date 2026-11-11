@@ -405,11 +405,11 @@ def cli():
     )
     parser.add_argument(
         "--label-dirs", action="store_true", default=False,
-        help="Label N/S/W/E sections of the domain (default: False)"
+        help="Label N/S/W/E sections of the domain"
     )
     parser.add_argument(
         "--label", action="store_true", default=False,
-        help="Overlay camera marker and field-of-view on top view (default: False)"
+        help="Overlay camera marker and field-of-view on top view"
     )
     parser.add_argument(
         "--camera-position", type=float, nargs=3, metavar=('X', 'Y', 'Z'),

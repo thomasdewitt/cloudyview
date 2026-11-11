@@ -353,7 +353,7 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
         raise ValueError(
             "A periodic domain needs the sun above the horizon; got "
             f"sun_elevation={view.sun_elevation}. The light march exits "
-            f"through the domain top, so keep it >= {MIN_SUN_ELEVATION_DEG}.")
+            "through the domain top.")
     # The surface flag is what draws the city; with it off the scene is a
     # night sky over an empty ground plane, which looks like a renderer bug.
     check_surface(state.surface)
