@@ -392,24 +392,57 @@ fn surface_street_city(cr: CameraRay, prev: vec4<f32>) -> SurfaceOut {
     if (city_o.z < CITY_FURNITURE_TOP && dir.z > 0.0) {
         t_f1 = min(t_f1, (CITY_FURNITURE_TOP - city_o.z) / dir.z);
     }
+    // The stage shades at most one hit: a near prop's, or, on the ground, the
+    // reflection's (a prop hit clears ground). Both go through the one
+    // city_shade call below. The driver inlines every call, so two call
+    // sites would put two copies of the component shaders in the stage,
+    // which compiles cold in 74 s on an RTX 5080 (Chrome, Vulkan) against
+    // 16 s with one.
+    var sh: CityHit;
+    var sh_dir = dir;
+    var sh_ro = city_o;
+    var sh_fp = 0.0;
+    var sh_fp_filter = 0.0;
     if (t_f0 < t_f1) {
         // From the camera's own origin, so t stays the distance from the eye
         // that the props take their footprint from.
         let hp = city_trace(city_o, dir, t_f0, t_f1, CITY_TRACE_NEAR);
         if (hp.hit) {
-            t = hp.t;
             // Always a component's hit (kind >= 100: no near_props hook
-            // returns core kinds), so its shader directly — a second whole
-            // city_shade beside the reflection's cost registers here.
-            rgb = city_fog(cc_component_shade(hp, city_cell(hp.cell), dir,
-                                              pixel_angle * t),
-                           city_o, dir, t, hp.pos);
+            // returns core kinds), which city_shade hands straight to
+            // cc_component_shade; fp_filter and direct go unread.
+            t = hp.t;
+            sh = hp;
+            sh_fp = pixel_angle * t;
             ground = false;
         }
     }
+    var refl = vec3<f32>(0.0);
+    var refl_weight = 0.0;
     if (ground) {
-        rgb = rgb + city_wet_reflection(city_o, dir, t, pixel_angle,
-                                        cr.frame_index, cr.strat_pixel);
+        let wr = city_wet_reflection(city_o, dir, t, pixel_angle,
+                                     cr.frame_index, cr.strat_pixel);
+        refl = wr.add;
+        if (wr.hit.hit) {
+            sh = wr.hit;
+            sh_dir = wr.r;
+            sh_ro = wr.ro;
+            sh_fp = wr.fp;
+            sh_fp_filter = wr.fp_filter;
+            refl_weight = wr.weight;
+        }
+    }
+    if (sh.hit) {
+        let l = city_fog(city_shade(sh, sh_dir, sh_fp, sh_fp_filter, false),
+                         sh_ro, sh_dir, sh.t, sh.pos);
+        if (ground) {
+            refl = refl + refl_weight * l;
+        } else {
+            rgb = l;
+        }
+    }
+    if (ground) {
+        rgb = rgb + refl;
     }
     if (near && city_steam_live()) {
         // The live view draws its steam after the accumulation
@@ -552,15 +585,30 @@ fn city_refl_rand(pixel: vec2<u32>, frame: u32) -> vec4<f32> {
                  + vec4<f32>(vec2<f32>(a), vec2<f32>(b)) * STRAT_INV_2P32);
 }
 
+// The wet street's reflection at the ground hit t along dir, short of the
+// shade of what it sees: the street stage makes that shade (one city_shade
+// for the stage) and adds weight * its fogged radiance to add.
+struct CityWetReflection {
+    add: vec3<f32>,      // what is added without a shade: the environment
+                         // estimate, and the fogged sky on a traced miss
+    hit: CityHit,        // the traced hit to shade, if any
+    weight: f32,         // what its fogged radiance is added at
+    ro: vec3<f32>,       // the reflected ray's origin and direction
+    r: vec3<f32>,
+    fp: f32,             // city_shade's fp and fp_filter for the hit
+    fp_filter: f32,
+}
+
 fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
                        pixel_angle: f32, frame_index: u32,
-                       strat_pixel: vec2<u32>) -> vec3<f32> {
+                       strat_pixel: vec2<u32>) -> CityWetReflection {
+    var o: CityWetReflection;   // zeroed: nothing to add, no hit
     let pos = city_o + t * dir;
     let cell = vec2<i32>(floor(pos.xy / u.tile_cell));
     let cc = city_cell(cell);
     let paved = city_ground_paved(cc, cell, pos.xy);
     if (city_ground_is_lot(paved, cc)) {
-        return vec3<f32>(0.0);   // yards and scrub are dry dirt
+        return o;   // yards and scrub are dry dirt
     }
     let h = CityHit(true, t, pos, vec3<f32>(0.0, 0.0, 1.0), 0, cell);
     let fp = pixel_angle * t;
@@ -568,10 +616,10 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
     let rnd = city_refl_rand(strat_pixel, frame_index);
     let lobe = city_wet_lobe(h, g, dir, pixel_angle, rnd.xyz);
     if (!lobe.ok) {
-        return vec3<f32>(0.0);
+        return o;
     }
     let w = lobe.w * city_fog_trans(city_o, dir, t, pos);
-    var add = (w * lobe.blend) * lobe.env;
+    o.add = (w * lobe.blend) * lobe.env;
     // Russian roulette on what is left to trace: a lobe whose weight is
     // under CITY_REFL_RR (a steep view, a damp film, a far pixel) is traced
     // with probability w / RR and counted RR / w times over when it is.
@@ -581,26 +629,27 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
         let ro = vec3<f32>(pos.xy, pos.z + 0.02);
         let hr = city_trace(ro, lobe.r, 0.0, CITY_REFL_RANGE,
                             CITY_TRACE_PLAIN);
-        var l = vec3<f32>(0.0);
         if (!hr.hit) {
             // Fogged over the range it searched, as a hit at the range
             // would have been.
             let far = ro + CITY_REFL_RANGE * lobe.r;
-            l = city_fog(city_reflect_sky(u.cam_origin + t * dir, lobe.r,
-                                          city_frame_rand(strat_pixel,
-                                                          frame_index,
-                                                          CITY_RAND_REFLECT).w),
-                         ro, lobe.r, CITY_REFL_RANGE, far);
+            let l = city_fog(city_reflect_sky(u.cam_origin + t * dir, lobe.r,
+                                              city_frame_rand(strat_pixel,
+                                                              frame_index,
+                                                              CITY_RAND_REFLECT).w),
+                             ro, lobe.r, CITY_REFL_RANGE, far);
+            o.add = o.add + (wt / p_tr) * l;
         } else {
-            let fp_r = pixel_angle * (t + hr.t) + 0.5 * lobe.alpha * hr.t;
+            o.hit = hr;
+            o.weight = wt / p_tr;
+            o.ro = ro;
+            o.r = lobe.r;
+            o.fp = pixel_angle * (t + hr.t) + 0.5 * lobe.alpha * hr.t;
             // The texture under the lobe, filtered over its footprint on the
             // true pixel's terms.
-            let fp_f = true_pixel_angle() * (t + hr.t)
-                       + 0.5 * lobe.alpha * hr.t;
-            l = city_fog(city_shade(hr, lobe.r, fp_r, fp_f, false), ro,
-                         lobe.r, hr.t, hr.pos);
+            o.fp_filter = true_pixel_angle() * (t + hr.t)
+                          + 0.5 * lobe.alpha * hr.t;
         }
-        add = add + (wt / p_tr) * l;
     }
-    return add;
+    return o;
 }
