@@ -380,8 +380,8 @@ const CYBERPUNK_BACKDROP = "demos/cyberpunk/still.webp";
  *
  * The reel is not stopped or rewound — CSS covers it while the body carries
  * mode-cyberpunk, and uncovers it on the way out, so leaving cyberpunk shows
- * whatever the hover had left on top. All this does is decline to download a
- * quarter of a megabyte until somebody asks for the mode.
+ * whatever the hover had left on top. All this does is decline to download the
+ * backdrop until somebody asks for the mode.
  */
 function showCyberpunkBackdrop(on) {
   if (!on || dom.cyberBack.src) return;

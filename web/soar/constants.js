@@ -851,8 +851,13 @@ export const AUTO_TIER_WARMUP_FRAMES_CADENCE = 2;
 // resets it, because the hold ladder's frames measure the wrong
 // configuration (and its top rung can cost 400 ms, which is not evidence
 // about flight).
-export const GOVERNOR_MIN_FRAMES = 60;
-export const GOVERNOR_MIN_SECONDS = 3.0;
+//
+// Which of the two is waited for depends on the frame rate. Above 20 fps
+// the seconds are, so a tier that holds the beat is tested for 1.5 s. Below
+// it the frame count is, so a tier failing its trial at 100 ms a frame is
+// flown for 3 s before the step back.
+export const GOVERNOR_MIN_FRAMES = 30;
+export const GOVERNOR_MIN_SECONDS = 1.5;
 // A rung that failed its trial is not retried before this. Long enough to
 // outlive the regime that refused it (a thick view flown through), short
 // enough that a machine that was merely still warming up gets another look.
