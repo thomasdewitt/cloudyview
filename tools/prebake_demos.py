@@ -107,14 +107,6 @@ OUT = REPO / "web" / "soar" / "demos"
 # says so — there is nothing here to fall back to.
 STEAM_SRC = REPO.parent / "turbulon-model" / "demos" / "fields"
 
-# The RCEMIP small-domain intercomparison output — one RCE protocol run by
-# several models — lives on the external drive rather than in data/demos: the
-# set is tens of gigabytes and it is shared with the STEAM comparison figures,
-# so there is one copy of it and this is where it is. A spec that names it
-# only bakes on the machine with the drive mounted; the baked products in
-# web/soar/demos/ are what the repo carries.
-RCEMIP_SRC = Path("/Volumes/BLUE/STEAM visuals and demos/RCEMIP LES comparison")
-
 # The rail on the landing page is grouped, and the grouping lives here: each
 # spec names a group, and every group is declared below whether or not it has
 # anything in it yet. A group with no demos ships as "coming-soon", which the
@@ -416,7 +408,6 @@ DEMOS = [
         liquid=("RCEMIP_SST300_480x480x146-200m-2s_480_0002160000.nc", "QN"),
         ice=None,
         split=dict(var="TABS", t_ice=253.16, t_liquid=273.16),
-        src=RCEMIP_SRC,
         dims="zyx",
         crop=dict(y=(0, 480), x=(0, 480), z="auto"),
         scale=1.0,                       # QN units attribute says g/kg
@@ -437,7 +428,6 @@ DEMOS = [
         field="Radiative–convective equilibrium",
         liquid=("DALES_RCE_small_les300_3D_clw_t30.nc", "clw"),
         ice=("DALES_RCE_small_les300_3D_cli_t30.nc", "cli"),
-        src=RCEMIP_SRC,
         dims="zyx",
         # DALES writes cell centres as xt/yt/zt rather than x/y/z.
         coords=("xt", "yt", "zt"),
