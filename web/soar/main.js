@@ -834,24 +834,26 @@ async function wireFlyPair(railTask) {
 }
 
 /**
- * Pointing at one of the two buttons lights its case in the rail, with the
- * look the case's own card has under the pointer: the amber border and its
- * note open. That is where research mode lists the pair, so the button says
- * which row it is.
+ * Pointing at one of the two buttons shows what it flies: the backdrop
+ * becomes that case's still, and in the rail, where research mode lists the
+ * pair, its card takes the look it has under the pointer itself (the amber
+ * border, its note open).
  *
- * Only the card's look, not the whole preview a card's hover starts: that
- * fades the rest of the page out, the two buttons with it. A preview still
- * winding down from a card the pointer just left is ended here for the same
- * reason, and so that its timer cannot put this card out a moment later.
+ * The still and the card's look, not the whole preview a card's hover
+ * starts: that fades the rest of the page out, the two buttons with it. A
+ * preview winding down from a card the pointer just left is ended here for
+ * the same reason, and so that its timer cannot put this card out a moment
+ * later. Like a card's, the still stays when the pointer leaves.
  */
 function lightFlyCase(which, on) {
+  const demo = flyDemo(which);
   if (on) {
     clearTimeout(previewHold);
     document.body.classList.remove("previewing");
+    if (demo) showReel(demo, flyIndex.root);
   }
-  const id = flyDemo(which)?.id;
   for (const card of dom.rail.querySelectorAll(".demo")) {
-    card.classList.toggle("live", on && card.dataset.demo === id);
+    card.classList.toggle("live", on && card.dataset.demo === demo?.id);
   }
 }
 
