@@ -421,6 +421,8 @@ function demoCard(demo, root, numbers) {
   const button = document.createElement("button");
   button.className = "demo";
   button.type = "button";
+  // So the fly pair's buttons can find their case's card (lightFlyCase).
+  button.dataset.demo = demo.id;
   // The regime and the numbers are always visible rather than revealed on
   // hover: they are the reason the list is a list of these particular cases,
   // and comparing them across rows is the point — DYCOMS resolves 5 m over
@@ -823,8 +825,34 @@ async function wireFlyPair(railTask) {
       if (!demo) return;
       return enterViewer(demoSource(flyIndex.root, demo));
     });
+    button.addEventListener("mouseenter", () => lightFlyCase(which, true));
+    button.addEventListener("focus", () => lightFlyCase(which, true));
+    button.addEventListener("mouseleave", () => lightFlyCase(which, false));
+    button.addEventListener("blur", () => lightFlyCase(which, false));
   }
   await refreshFlyPair();
+}
+
+/**
+ * Pointing at one of the two buttons lights its case in the rail, with the
+ * look the case's own card has under the pointer: the amber border and its
+ * note open. That is where research mode lists the pair, so the button says
+ * which row it is.
+ *
+ * Only the card's look, not the whole preview a card's hover starts: that
+ * fades the rest of the page out, the two buttons with it. A preview still
+ * winding down from a card the pointer just left is ended here for the same
+ * reason, and so that its timer cannot put this card out a moment later.
+ */
+function lightFlyCase(which, on) {
+  if (on) {
+    clearTimeout(previewHold);
+    document.body.classList.remove("previewing");
+  }
+  const id = flyDemo(which)?.id;
+  for (const card of dom.rail.querySelectorAll(".demo")) {
+    card.classList.toggle("live", on && card.dataset.demo === id);
+  }
 }
 
 /** This mode's demo for one of the two buttons, or undefined. */
