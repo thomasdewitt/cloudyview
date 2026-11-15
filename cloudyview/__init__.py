@@ -16,7 +16,7 @@ package (``cv.glimpse`` is the function). The submodules stay importable
 directly, e.g. ``from cloudyview.witness import NestedLevel``.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 from importlib import import_module
 import sys
