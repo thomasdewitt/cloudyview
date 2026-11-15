@@ -369,11 +369,11 @@ async function showReel(demo, root) {
 }
 
 // The cyberpunk backdrop: one offline render of the view a cyberpunk flight
-// opens on (constants.js CITY_START_CAMERA), over the C1=0.07 city tile and
-// under the mode's moon, at the max preset. It ships with the city tile it is
-// a picture of rather than with a demo, because it is a picture of the MODE:
-// no demo owns it, and the field under it is the same field the pair loads.
-const CYBERPUNK_BACKDROP = "city/landing.webp";
+// opens on (constants.js CITY_START_CAMERA), under the mode's moon, at the max
+// preset, baked by tools/prebake_demos.py (CYBERPUNK). It is a picture of the
+// MODE, not of a demo, so it is not in the index; it sits with the demo stills
+// because it is baked and shipped with them, over a demo's own volume.
+const CYBERPUNK_BACKDROP = "demos/cyberpunk/still.webp";
 
 /**
  * The mode's own backdrop, in place of the demo reel.

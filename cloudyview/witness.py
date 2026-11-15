@@ -262,6 +262,7 @@ def render_nested(
     surface_origin: Optional[Sequence[float]] = None,
     surface: str = "ocean",
     city_offset: Optional[Sequence[float]] = None,
+    city_roof_density: Optional[float] = None,
     scene_time: float = 0.0,
     return_linear: bool = False,
     verbose: bool = True,
@@ -274,6 +275,12 @@ def render_nested(
     witness()'s, where they are described; `image_size` and `fov_degrees`
     are its `size` and its camera's `fov`, and `step_voxel_factor` is the
     march step in units of the smallest voxel when no `quality` sets it.
+
+    `city_roof_density` is the one keyword witness() does not have: the
+    city's roof clutter, which otherwise comes from `quality`'s tier, or is
+    1 (the density the roofs were tuned at) with no tier. It is for a still
+    that wants a tier's roofs at its own number of passes, which `quality`
+    cannot give because the tier sets the passes too. Giving both is refused.
 
     The shader carries one optional nest (`NESTED` is a compile-time switch,
     and core WebGPU cannot index textures dynamically), so more than two
@@ -300,6 +307,15 @@ def render_nested(
         raise ValueError(
             f"city_offset places the night city's tile, but surface is "
             f"'{surface}'; pass surface='city' or drop the offset.")
+    if city_roof_density is not None:
+        if surface != "city":
+            raise ValueError(
+                f"city_roof_density is the night city's roof clutter, but "
+                f"surface is '{surface}'; pass surface='city' or drop it.")
+        if quality is not None:
+            raise ValueError(
+                f"quality='{quality}' sets the roof density from its tier; "
+                "give city_roof_density or quality, not both.")
     if scene_time != 0.0:
         # Only a surface with a clock reads it (its meta.json clock_period_s:
         # the city's steam). Over one without, --time would silently do
@@ -389,9 +405,11 @@ def render_nested(
         light_cache=bool(tier and tier["light_cache"]),
         scene_time=float(scene_time),
         # The roofs' clutter follows the tier, as in the browser; a render
-        # with no tier gets the density the roofs were tuned at.
+        # with no tier gets the density it asked for, or the density the
+        # roofs were tuned at.
         city_roof_density=(tier["city_roof_density"] if tier
-                           else 1.0),
+                           else city_roof_density if city_roof_density
+                           is not None else 1.0),
     )
     if verbose:
         print(f"  Rendering {w}x{h}, {accumulate} accumulated passes, "

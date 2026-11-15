@@ -20,7 +20,13 @@ Two products per demo, both written to web/soar/demos/<id>/:
       witness — which is the same shader the browser runs, so the preview
       is the thing itself rather than an impression of it.
 
+And one still that is not a demo's: cyberpunk mode's landing backdrop,
+web/soar/demos/cyberpunk/still.webp, the view a cyberpunk flight opens on
+(see CYBERPUNK below). It is rendered last, from a demo's bake, so a run
+that re-bakes that demo pictures the new one.
+
     uv run python tools/prebake_demos.py            # everything
+    uv run python tools/prebake_demos.py --only cyberpunk   # just the backdrop
     uv run python tools/prebake_demos.py --only rce --skip-volume
     uv run python tools/prebake_demos.py --ice-only     # just ice.bin.gz
     uv run python tools/prebake_demos.py --index-only   # regroup, no baking
@@ -54,6 +60,7 @@ from cloudyview.soar.uniforms import (DEFAULT_CONTRAST, DEFAULT_EXPOSURE,
                                       DEFAULT_LOD_STRENGTH,
                                       DEFAULT_TONE_MAP_GAMMA,
                                       DEFAULT_TONE_MAP_WHITE_POINT)
+from cloudyview.soar.tiers import QUALITY_PRESETS
 from cloudyview.soar.uniforms import camera_world_origin
 from cloudyview.witness import NestedLevel, crop_empty_z, render_nested
 from export_web_assets import _volume_aabb
@@ -447,6 +454,44 @@ DEMOS = [
     # synthetic slot on the rail belongs to STEAM. Its source field stays in
     # data/demos/, so adding it is a spec here plus a bake.
 ]
+
+# Cyberpunk mode's landing backdrop (web/soar/main.js CYBERPUNK_BACKDROP).
+# The mode has no reel: it has one picture of itself, the view a cyberpunk
+# flight opens on. It is the MODE's, not a demo's, so it is not in the index
+# and has no meta.json; it sits with the demo stills in a folder of its own
+# because it is baked and shipped with them. The field over the city is a
+# demo's all the same, the one the mode's "more detailed" button flies, and
+# it is read from that demo's bake: the backdrop is then the volume the mode
+# downloads, and a run that re-bakes that demo renders this after it.
+#
+# The rest is a max-tier capture parked at the start camera: the city's
+# parked LOD, max's roofs and max's haze, the exposure metered by the app's
+# rule. Each number is the app's, restated because Python cannot import an
+# ES module; tests/city/test_cyberpunk_backdrop.py pins them to constants.js
+# and main.js.
+CYBERPUNK = dict(
+    id="cyberpunk",
+    title="Cyberpunk mode backdrop",
+    field_demo="congestus",                     # main.js cyberpunk.more
+    out=OUT / "cyberpunk" / "still.webp",
+    surface="city",
+    periodic=True,
+    city_offset=(8100.0, -44190.0),             # CITY_TILE_OFFSET_M
+    city_roof_density=QUALITY_PRESETS["max"]["city_roof_density"],
+    sun=dict(azimuth=335.0, elevation=13.5),    # CITY_MOON
+    # CITY_START_CAMERA: x and y in metres in the city tile, z world metres.
+    camera_city_m=(24240.74, 68827.51, 26.88),
+    # The scene clock the 2026-11-15 capture was taken at, which only the
+    # city's steam reads. The flight opens at 0; the picture is the moment
+    # that was chosen, so it keeps its own.
+    scene_time=539.8195,
+    still=dict(
+        size=(1920, 1080),
+        azimuth=315.60, elevation=-5.08, fov=100.0,
+        exposure="auto",
+        lod=0.01,                               # CITY_PARKED_LOD_STRENGTH
+    ),
+)
 
 # --- loading ---------------------------------------------------------------
 
@@ -959,6 +1004,17 @@ def march(spec: dict, subject, *, position, azimuth, elevation, fov, size,
                   periodic=spec.get("periodic", True),
                   surface=spec.get("surface", "ocean"),
                   accumulate=accumulate, return_linear=return_linear)
+    if common["surface"] == "city":
+        # Only render_nested takes the roof density, and the one city still
+        # (CYBERPUNK) renders from a bake, so a city spec handed a source
+        # field is a spec this function was not written for.
+        if not isinstance(subject, NestedLevel):
+            raise TypeError(
+                f"{spec['id']}: a city still renders from a baked level, "
+                f"not a {type(subject).__name__}")
+        common["city_offset"] = spec["city_offset"]
+        common["city_roof_density"] = spec["city_roof_density"]
+        common["scene_time"] = spec.get("scene_time", 0.0)
     if isinstance(subject, NestedLevel):
         return render_nested(
             [subject],
@@ -1041,9 +1097,10 @@ def auto_exposure(spec: dict, subject, view: dict,
 
 # --- the preview still ------------------------------------------------------
 
-def render_still(spec: dict, subject, out: Path, size,
+def render_still(spec: dict, subject, target: Path, size,
                  accumulate: int, quality: int) -> dict:
-    """One converged frame, which is what a hover preview should be.
+    """One converged frame, which is what a hover preview should be,
+    written to `target` (a .webp).
 
     This was a video for a while. The arithmetic killed it: a 60 s 1440p60
     loop lands somewhere around 30-110 MB per demo, which for the FIF cascade
@@ -1114,19 +1171,19 @@ def render_still(spec: dict, subject, out: Path, size,
         # on the machines this runs on, which magick is not. cwebp writes no
         # metadata, so there is nothing left to -strip.
         subprocess.run(["cwebp", "-quiet", "-q", str(quality), "-m", "6",
-                        str(master), "-o", str(out / "still.webp")],
+                        str(master), "-o", str(target)],
                        check=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    nbytes = (out / "still.webp").stat().st_size
-    print(f"    still.webp {nbytes/1e3:.0f} kB (rendered in {render_s:.1f}s)")
+    nbytes = target.stat().st_size
+    print(f"    {target.name} {nbytes/1e3:.0f} kB (rendered in {render_s:.1f}s)")
     # The camera goes into meta.json because the app opens there: the viewer
     # reads `still.camera` and starts flight from it, so clicking a case puts
     # you where its picture was taken from. `look` rides along as the record
     # of how the picture was tone-mapped — witness reproduces it exactly from
     # these numbers, and the viewer can choose to adopt them.
-    return {"file": "still.webp", "size": list(size), "bytes": int(nbytes),
+    return {"file": target.name, "size": list(size), "bytes": int(nbytes),
             "camera": {"position": list(position), "azimuth": azimuth,
                        "elevation": elevation, "fov": fov},
             "look": look,
@@ -1263,11 +1320,51 @@ def bake_ice_only(only) -> None:
         del field
 
 
+# --- cyberpunk's backdrop ----------------------------------------------------
+
+def city_camera_world(city_m, offset) -> tuple[float, float, float]:
+    """A camera in the city tile's frame, in world metres.
+
+    scene.js cityStartCamera: world x/y are the tile offset plus the city
+    metres, and z is world z already. Deliberately not folded into the cloud
+    box: folding by the box moves the camera by a whole domain, a domain is
+    not a whole number of tiles, and the camera would land in a different
+    district. The volume is periodic, so outside the box there is still field.
+    """
+    return (offset[0] + city_m[0], offset[1] + city_m[1], city_m[2])
+
+
+def world_to_relative(world, bmin, bmax) -> tuple[float, float, float]:
+    """camera.js worldToRelative, the inverse of camera_world_origin."""
+    return (2.0 * (world[0] - bmin[0]) / (bmax[0] - bmin[0]) - 1.0,
+            2.0 * (world[1] - bmin[1]) / (bmax[1] - bmin[1]) - 1.0,
+            2.0 * world[2] / bmax[2] - 1.0)
+
+
+def render_backdrop(spec: dict, size, accumulate: int, quality: int) -> dict:
+    """CYBERPUNK's picture, over its field demo's baked volume."""
+    demo = next((s for s in DEMOS if s["id"] == spec["field_demo"]), None)
+    if demo is None:
+        raise KeyError(f"{spec['id']} stands on demo '{spec['field_demo']}', "
+                       "which DEMOS does not declare")
+    level = baked_level(demo, OUT / demo["id"])
+    world = city_camera_world(spec["camera_city_m"], spec["city_offset"])
+    rel = world_to_relative(world, level.bmin, level.bmax)
+    print(f"    over {demo['id']}'s bake; city camera "
+          f"{tuple(spec['camera_city_m'])} m is world "
+          f"({world[0]:.1f}, {world[1]:.1f}, {world[2]:.1f}) m", flush=True)
+    shot = {**spec, "still": {**spec["still"], "position": rel}}
+    spec["out"].parent.mkdir(parents=True, exist_ok=True)
+    return render_still(shot, level, spec["out"], size, accumulate, quality)
+
+
 # --- driver ----------------------------------------------------------------
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--only", nargs="*", help="demo ids to build")
+    ap.add_argument("--only", nargs="*",
+                    help="demo ids to build; 'cyberpunk' is the mode's "
+                         "landing backdrop")
     ap.add_argument("--index-only", action="store_true",
                     help="rewrite web/soar/demos/index.json from the existing "
                          "per-demo meta.json files and bake nothing; the way "
@@ -1296,6 +1393,12 @@ def main() -> None:
                          "assuming them: sigma does not contain the two "
                          "mixing ratios, so neither can be re-derived.")
     args = ap.parse_args()
+
+    known = {s["id"] for s in DEMOS} | {CYBERPUNK["id"]}
+    unknown = sorted(set(args.only or ()) - known)
+    if unknown:
+        ap.error(f"--only {' '.join(unknown)}: no such demo; have "
+                 f"{' '.join(sorted(known))}")
 
     OUT.mkdir(parents=True, exist_ok=True)
 
@@ -1404,7 +1507,8 @@ def main() -> None:
                 stale.unlink()
                 print("    removed ice.bin.gz (this demo has no ice variable)")
         if not args.skip_still:
-            meta["still"] = render_still(spec, field, out, tuple(args.size),
+            meta["still"] = render_still(spec, field, out / "still.webp",
+                                         tuple(args.size),
                                          args.accumulate, args.quality)
         meta_path.write_text(json.dumps(meta, indent=1))
         del field
@@ -1412,6 +1516,13 @@ def main() -> None:
     # Always from disk, never from this run: a partial bake and a full one
     # then write the same file, and there is no merge step to get wrong.
     write_index(strict=False)
+
+    # Last, so it stands on this run's bake of its field demo if there was
+    # one. It is a still and nothing else, so --skip-still skips it.
+    if not args.skip_still and (not args.only or CYBERPUNK["id"] in args.only):
+        print(f"\n=== {CYBERPUNK['id']}: {CYBERPUNK['title']} ===", flush=True)
+        render_backdrop(CYBERPUNK, tuple(args.size), args.accumulate,
+                        args.quality)
 
 
 if __name__ == "__main__":

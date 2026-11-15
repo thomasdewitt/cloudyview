@@ -369,6 +369,19 @@ def test_witness_refuses_a_city_without_a_district():
                       city_offset=(0, 0))
 
 
+def test_witness_takes_a_roof_density_only_for_a_city_without_a_tier():
+    from cloudyview.witness import render_nested
+    with pytest.raises(ValueError, match="surface='city'"):
+        render_nested([None], (0, 0, 0), azimuth=0, elevation=0,
+                      sun_azimuth=0, sun_elevation=20, surface="ocean",
+                      city_roof_density=1.4)
+    with pytest.raises(ValueError, match="not both"):
+        render_nested([None], (0, 0, 0), azimuth=0, elevation=0,
+                      sun_azimuth=0, sun_elevation=20, surface="city",
+                      city_offset=(0, 0), city_roof_density=1.4,
+                      quality="max")
+
+
 # --- a coarse demo: the command remakes the grid the bake shipped ----------
 #
 # marine-congestus-coarse is demo_marine-congestus.nc block-averaged 2x2x2 by

@@ -70,7 +70,7 @@ cloudyview = [
     "soar/shader/city/*.wgsl",
     "soar/shader/city/components/*.wgsl",
     "soar/ocean/*",
-    # The night city's tile, not the landing backdrop.
+    # The night city's tile.
     "soar/city/meta.json",
     "soar/city/fif_mip*.bin",
 ]

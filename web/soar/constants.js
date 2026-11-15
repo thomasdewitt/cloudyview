@@ -150,12 +150,16 @@ export const SURFACE_TILE_SCHEMAS = {
 export const SURFACE_FRAME_TILES = { ocean: 16, city: 1 };
 // From the same still the start camera and the landing backdrop come from:
 // the moon the view was composed under is part of the view.
-export const CITY_MOON = { azimuth: 181.0, elevation: 20.0 };
+export const CITY_MOON = { azimuth: 335.0, elevation: 13.5 };
 
-// Where a cyberpunk flight opens: down in the streets, looking north-west
-// along a canyon with the moon off the right shoulder. These six numbers are
-// the metadata of a still captured there, and the landing page's cyberpunk
-// backdrop is the same view rendered offline.
+// Where a cyberpunk flight opens: at roof height over a low-rise block on a
+// lit intersection, the downtown towers across the skyline behind it and the
+// moon low among them. These six numbers are the metadata of a still captured
+// there (2026-11-15, max tier), and the landing page's cyberpunk backdrop is
+// the same view rendered offline by tools/prebake_demos.py (CYBERPUNK).
+// It is also where the first-flight tutorial puts a cyberpunk visitor
+// (viewer.tutorialSpawn), which wants a LOW start so that turning the mouse
+// swings the world past: 27 m, among the roofs, is that already.
 //
 // The mode's, not the demo's: a borrowed demo carries the camera ITS landing
 // still was taken from, which is a daylight aerial over cloud tops, and
@@ -169,24 +173,10 @@ export const CITY_MOON = { azimuth: 181.0, elevation: 20.0 };
 // street. scene.js converts this
 // to the loaded field's relative frame at build time.
 export const CITY_START_CAMERA = {
-  positionCityM: [17393.0, 61646.0, 309.0],
-  azimuth: 168.60,
-  elevation: -1.20,
+  positionCityM: [24240.74, 68827.51, 26.88],
+  azimuth: 315.60,
+  elevation: -5.08,
   fov: 100.0,
-};
-
-// Where the first-flight tutorial puts a cyberpunk visitor. The tutorial
-// wants a LOW start (viewer.tutorialSpawn: turning the mouse should swing
-// the world past), which over the sea is the water line and in the city,
-// taken straight down from CITY_START_CAMERA, would be a spot 23 m off the
-// street facing a building's flank — a first sight of a dark wall. This is
-// the same street's centre line, 60 m up, looking down its canyon: lit towers on both
-// sides and the facades close enough to show their relief. City frame, like
-// CITY_START_CAMERA.
-export const CITY_TUTORIAL_CAMERA = {
-  positionCityM: [17370.0, 61700.0, 60.0],
-  azimuth: 180.0,
-  elevation: 8.0,
 };
 
 // Flight speed a cyberpunk session opens at, m/s. The

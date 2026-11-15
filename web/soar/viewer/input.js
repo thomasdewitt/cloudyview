@@ -305,7 +305,7 @@ export const input = {
    * point: the first prompt asks for the mouse, and a beginner who moves it
    * wants the sea and the sky to swing past — a start high above the field
    * looks the same whichever way it is turned. In the city: the start
-   * street's canyon (CITY_TUTORIAL_CAMERA), lit towers on both sides.
+   * camera itself (CITY_START_CAMERA), which is at roof height already.
    */
   tutorialSpawn() {
     if (this.scene.city) {
@@ -321,7 +321,7 @@ export const input = {
       // absolute reposition (a replay from the menu puts it mid-flight) and
       // the collider must not sweep it as one frame of flight from wherever
       // the player was, stopping at the first wall (camera.js jump).
-      const pose = K.CITY_TUTORIAL_CAMERA;
+      const pose = K.CITY_START_CAMERA;
       const [tx, ty, tz] = pose.positionCityM;
       this.camera.jump(tx - s[0], ty - s[1], tz - this.camera.position[2]);
       this.camera.azimuth = pose.azimuth;
