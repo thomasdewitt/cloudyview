@@ -481,7 +481,7 @@ CYBERPUNK = dict(
     sun=dict(azimuth=335.0, elevation=13.5),    # CITY_MOON
     # CITY_START_CAMERA: x and y in metres in the city tile, z world metres.
     camera_city_m=(24240.74, 68827.51, 26.88),
-    # The scene clock the 2026-11-15 capture was taken at, which only the
+    # The scene clock the start camera's capture was taken at, which only the
     # city's steam reads. The flight opens at 0; the picture is the moment
     # that was chosen, so it keeps its own.
     scene_time=539.8195,

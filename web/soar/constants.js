@@ -155,7 +155,7 @@ export const CITY_MOON = { azimuth: 335.0, elevation: 13.5 };
 // Where a cyberpunk flight opens: at roof height over a low-rise block on a
 // lit intersection, the downtown towers across the skyline behind it and the
 // moon low among them. These six numbers are the metadata of a still captured
-// there (2026-11-15, max tier), and the landing page's cyberpunk backdrop is
+// there (max tier), and the landing page's cyberpunk backdrop is
 // the same view rendered offline by tools/prebake_demos.py (CYBERPUNK).
 // It is also where the first-flight tutorial puts a cyberpunk visitor
 // (viewer.tutorialSpawn), which wants a LOW start so that turning the mouse

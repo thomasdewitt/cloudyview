@@ -409,9 +409,7 @@ def test_two_km_per_second_into_a_mast_does_not_tunnel():
 
 
 def test_a_real_building_of_the_shipped_tile():
-    # Downtown, near where the cyberpunk session opened until 2026-11-15
-    # (city (17393, 61646), cell (193, 684)), and where the tutorial still
-    # does.
+    # Downtown, among the towers: city (17393, 61646), cell (193, 684).
     r = fly(city="tile", near=[193, 684], azimuth=EAST, elevation=0.0,
             speed=20.0, keys=["w"], fps=60, seconds=5.0)
     frames = r["frames"]
@@ -817,8 +815,8 @@ for (let cy = 640; cy < 730 && out.edgeBuds < 40; cy++) {
 
 while (out.segments < 800 + out.edgeBuds) {
   const r = rnd() < 0.5 ? 0.2 : 0.35;
-  // Downtown, around where the cyberpunk tutorial opens, low enough to be
-  // among the buildings.
+  // Downtown, around the same towers as the real-building test above, low
+  // enough to be among the buildings.
   const p0 = [17393 + (rnd() - 0.5) * 4000, 61646 + (rnd() - 0.5) * 4000,
               rnd() * 150];
   if (solidAt(p0, r)) continue;
