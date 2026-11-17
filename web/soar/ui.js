@@ -28,11 +28,13 @@ export const MODE_KEY = "soar.mode";
  * line and has to say what it switches, not just which of three.
  */
 export const MODES = {
+  // In the start page's order (main.js MODES): the toggle is drawn in this
+  // order, and the same three words should not swap sides between the two.
+  research: { label: "Research mode", items: null },
   basic: {
     label: "Basic mode",
     items: ["sun", "lensWater", "capture", "controls", "tutorial", "leave"],
   },
-  research: { label: "Research mode", items: null },
   cyberpunk: {
     label: "Cyberpunk mode",
     // Basic's menu exactly: cyberpunk is basic's complexity over a different

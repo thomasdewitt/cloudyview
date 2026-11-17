@@ -13,6 +13,14 @@ import * as K from "../constants.js";
 const TUTORIAL_REFUSED = new Set(
   ["Tab", "f", "F3", "`", "b", "i", "m", "r", "k", "p", "F12"]);
 
+/** True when a key pressed on `target` is text being typed into a field. */
+function typingInto(target) {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target instanceof HTMLTextAreaElement || target.isContentEditable) return true;
+  return target instanceof HTMLInputElement
+    && !["range", "checkbox", "radio", "button", "file"].includes(target.type);
+}
+
 export const input = {
   _bindInput() {
     const canvas = this.canvas;
@@ -110,6 +118,8 @@ export const input = {
     }, { passive: true, signal });
 
     document.addEventListener("keydown", (e) => this._onKeyDown(e), { signal });
+    document.addEventListener("fullscreenchange",
+      () => this._holdEscapeInFullscreen(), { signal });
     document.addEventListener("keyup", (e) => {
       this.camera.keys.delete(e.key.toLowerCase());
       this._wake("keyup");
@@ -176,6 +186,9 @@ export const input = {
     }
 
     if (key === "Escape") {
+      // Claimed, so that in fullscreen the browser does not act on it too:
+      // see _holdEscapeInFullscreen.
+      e.preventDefault();
       // Escape reaches us by three routes that can all fire for one physical
       // press: the browser releasing the pointer lock, the keydown itself,
       // and auto-repeat if the key is held a moment. Any two of them in
@@ -200,7 +213,12 @@ export const input = {
       else this.pause();
       return;
     }
-    if (this.ui.isOpen) return;
+    if (this.ui.isOpen) {
+      // Fullscreen is the one flight key the open menu keeps: Escape there
+      // closes the menu and no longer leaves fullscreen, so F has to.
+      if (key === "f" && !typingInto(e.target)) this.toggleFullscreen();
+      return;
+    }
 
     switch (key) {
       case "Tab":
@@ -295,6 +313,27 @@ export const input = {
   toggleFullscreen() {
     if (document.fullscreenElement) document.exitFullscreen();
     else document.documentElement.requestFullscreen();
+  },
+
+  /**
+   * In fullscreen, keep Escape for the menu.
+   *
+   * A browser leaves fullscreen on Escape by itself, before the page hears
+   * the key, so one press both opened the menu (through the lost pointer)
+   * and dropped out of fullscreen. Chromium lets a fullscreen page hold the
+   * key (the Keyboard Lock API): the press then arrives as a keydown, and if
+   * the page claims it with preventDefault, as _onKeyDown does, fullscreen
+   * stays. F leaves it. The browser keeps one way out of its own, pressing
+   * and holding Escape, and says so when fullscreen starts.
+   *
+   * Firefox and Safari have no such API; there Escape leaves fullscreen as
+   * it always did.
+   */
+  _holdEscapeInFullscreen() {
+    const keyboard = navigator.keyboard;
+    if (!keyboard?.lock) return;
+    if (document.fullscreenElement) keyboard.lock(["Escape"]).catch(() => {});
+    else keyboard.unlock();
   },
 
   /**

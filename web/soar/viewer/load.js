@@ -466,6 +466,9 @@ export const load = {
     this._resizeObserver?.disconnect();
     this._resizeObserver = null;
     if (this.captured) document.exitPointerLock();
+    // Escape was held for this viewer's menu (input.js
+    // _holdEscapeInFullscreen); give the key back to the browser.
+    navigator.keyboard?.unlock?.();
 
     try {
       await this.device.queue.onSubmittedWorkDone();
