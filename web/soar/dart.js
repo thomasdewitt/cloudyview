@@ -7,12 +7,9 @@
 // almost no damping, and everything it does after it leaves your hand is a
 // consequence of that:
 //
-//   - The PHUGOID. The signature of every paper plane ever thrown. It trades
-//     speed for height and back on a slow cycle a couple of seconds long —
-//     nose up, climb, slow, nose down, dive, gain speed, repeat — and because
-//     paper has essentially no pitch damping the cycle never dies out. If you
-//     only implement one thing here, this is the one; it is what makes a
-//     viewer say "paper aeroplane" before they have looked at the object.
+//   - It flies STEADY. In straight flight it holds its attitude and its
+//     height: no porpoising, no rocking. What moves it is what the flight
+//     does, a turn, a climb, a crash.
 //   - The WOBBLE. A dart's keel is its only fin and it is a small one, so
 //     directional stability is marginal and every turn rings a lightly damped
 //     roll-yaw oscillation that takes a second or two to settle. A bird damps
@@ -43,27 +40,11 @@ const DISTANCE = 2.6;
 const DROP = 0.62;
 const SCALE = 1.0;            // real A4: 0.174 m span, 0.297 m nose to tail
 
-// --- The phugoid ------------------------------------------------------------
-// Small, to match the bird's bob — a larger porpoise is too much vertical
-// travel against a parked camera. BOTH amplitudes scale,
-// and they have to: the height IS the pitch swing integrated, so shrinking
-// the travel while keeping the attitude swing would show a dart pitching up
-// and down without going anywhere.
-const PHUGOID_PERIOD = 2.15;      // s
-const PHUGOID_PITCH_DEG = 2.5;    // amplitude of the pitch swing
-const PHUGOID_BOB_M = 0.028;      // and of the height it trades for
-// Altitude lags attitude by a quarter cycle: the aeroplane is highest a
-// quarter cycle AFTER it is most nose-up, because it has to climb first.
-const PHUGOID_BOB_LAG = Math.PI / 2;
-// A real one is not a metronome — the cycle wanders in strength.
-const PHUGOID_WANDER_HZ = 0.19;
-
 // --- The wobble -------------------------------------------------------------
 const WOBBLE_PERIOD = 0.85;       // s, roll-yaw ring after a disturbance
 const WOBBLE_DEG = 4.2;           // deg of roll at full excitation
 const TAU_WOBBLE = 1.5;           // s, how long the ring takes to die
 const WOBBLE_PER_DEG_S = 0.020;   // excitation per deg/s of heading rate
-const WOBBLE_IDLE = 0.10;         // never quite still, even in smooth air
 
 // --- Flutter ----------------------------------------------------------------
 const FLUTTER_HZ_STILL = 9.0;
@@ -118,9 +99,8 @@ export class Dart extends Flyer {
       drop: DROP,
     });
 
-    this.phugoidPhase = 0.0;      // rad
     this.wobblePhase = 0.0;       // rad
-    this.wobbleAmp = WOBBLE_IDLE; // 0..1
+    this.wobbleAmp = 0.0;         // 0..1
     this.flutterPhase = 0.0;      // rad
     this.flutterAmp = 0.0;        // 0..1
     this.wingFlex = 0.0;          // rad, tip up
@@ -156,33 +136,12 @@ export class Dart extends Flyer {
   // ------------------------------------------------------------------
 
   /**
-   * Advance the phugoid. Returns {pitch, bob}: the degrees of nose-up it
-   * contributes now, and the metres of height that buys.
-   *
-   * The two are a quarter cycle apart and that is not a stylistic choice —
-   * it is what a phugoid is. Put them in phase and the aeroplane looks like
-   * it is being waved rather than flying.
-   */
-  _phugoid(dt) {
-    this.phugoidPhase = mod2pi(
-      this.phugoidPhase + TWO_PI * dt / PHUGOID_PERIOD);
-    const wander = 0.72 + 0.28 * Math.sin(TWO_PI * PHUGOID_WANDER_HZ * this._clock);
-    return {
-      pitch: PHUGOID_PITCH_DEG * wander * Math.sin(this.phugoidPhase),
-      bob: PHUGOID_BOB_M * wander
-         * Math.sin(this.phugoidPhase - PHUGOID_BOB_LAG),
-    };
-  }
-
-  /**
    * Advance the roll-yaw ring. `excite` is the magnitude of the heading rate
-   * in deg/s; a turn sets it going and it takes TAU_WOBBLE to die back to the
-   * idle level it never drops below.
+   * in deg/s; a turn sets it going and it takes TAU_WOBBLE to die away.
    */
   _wobble(dt, excite) {
     this.wobblePhase = mod2pi(this.wobblePhase + TWO_PI * dt / WOBBLE_PERIOD);
-    const target = Math.min(
-      1.0, WOBBLE_IDLE + Math.abs(excite) * WOBBLE_PER_DEG_S);
+    const target = Math.min(1.0, Math.abs(excite) * WOBBLE_PER_DEG_S);
     const k = 1.0 - Math.exp(-dt / TAU_WOBBLE);
     // Rings up fast and decays slowly: a disturbance is felt at once.
     this.wobbleAmp += (target - this.wobbleAmp) * (target > this.wobbleAmp ? 0.5 : k);
@@ -205,9 +164,8 @@ export class Dart extends Flyer {
     const tracked = this._track(dt, camera, {
       tauHeading: TAU_HEADING, tauSpeed: TAU_SPEED });
     if (tracked === null) {
-      const { bob } = this._phugoid(dt);
       this._flutter(dt);
-      this._place(camera.position, bob);
+      this._place(camera.position, 0.0);
       return;
     }
     // The rate the FLIGHT PATH is turning at — a thrown sheet rolls and rings
@@ -223,25 +181,18 @@ export class Dart extends Flyer {
     this.bank = clamp(this._bankSteady + this._wobble(dt, headingRate),
                       -BANK_MAX - WOBBLE_DEG, BANK_MAX + WOBBLE_DEG);
 
-    // Pitch: the climb the camera is actually doing, plus the phugoid.
-    const phugoid = this._phugoid(dt);
+    // Pitch: the climb the camera is actually doing.
     const hSpeed = Math.max(Math.hypot(vel[0], vel[1]), 15.0);
     const pitchTarget = clamp(
       Math.atan2(this._vz, hSpeed) / DEG, -PITCH_MAX, PITCH_MAX);
     const kp = 1.0 - Math.exp(-dt / TAU_PITCH);
     this._pitchSteady = (this._pitchSteady ?? 0.0)
                       + (pitchTarget - (this._pitchSteady ?? 0.0)) * kp;
-    this.pitch = clamp(this._pitchSteady + phugoid.pitch,
-                       -PITCH_MAX - PHUGOID_PITCH_DEG,
-                       PITCH_MAX + PHUGOID_PITCH_DEG);
+    this.pitch = this._pitchSteady;
 
-    // Wing flex follows the load. Bank pulls g in a turn; the phugoid pulls
-    // it at the bottom of every cycle, which is why the wings breathe with
-    // the porpoise even in still air.
+    // Wing flex follows the load: bank pulls g in a turn.
     const turnG = 1.0 / Math.max(Math.cos(this.bank * DEG), 0.35);
-    const phugoidG = -0.55 * Math.sin(this.phugoidPhase - PHUGOID_BOB_LAG);
-    const flexTarget = clamp(
-      FLEX_PER_G * (turnG - 1.0 + phugoidG), -FLEX_LIMIT * 0.5, FLEX_LIMIT);
+    const flexTarget = clamp(FLEX_PER_G * (turnG - 1.0), 0.0, FLEX_LIMIT);
     const kf = 1.0 - Math.exp(-dt / TAU_FLEX);
     this.wingFlex += (flexTarget - this.wingFlex) * kf;
 
@@ -251,6 +202,6 @@ export class Dart extends Flyer {
     this.keelSway += (keelTarget - this.keelSway) * kk;
 
     this._flutter(dt);
-    this._place(camera.position, phugoid.bob);
+    this._place(camera.position, 0.0);
   }
 }

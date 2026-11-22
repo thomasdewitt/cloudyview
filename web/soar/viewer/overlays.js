@@ -14,7 +14,7 @@ import { Dart } from "../dart.js";
  * order".
  *
  * The dart leads. It is the one that reads at a glance — pale against sky
- * where the swift is a dark speck, and its phugoid says "thrown object"
+ * where the swift is a dark speck, and its steady glide says "thrown object"
  * before you have looked at the shape — so it is the better first impression
  * of a renderer someone has just opened.
  */
