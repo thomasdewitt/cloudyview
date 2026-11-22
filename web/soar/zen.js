@@ -68,7 +68,7 @@ export const ZEN_CLOUD_CLIMB = 0.1;
 
 // --- over the city ----------------------------------------------------------
 
-export const ZEN_CITY_SPEED = 8.0;               // m/s
+export const ZEN_CITY_SPEED = 6.0;               // m/s
 // Above the buildings: the altitude range, the most the altitude changes
 // between two levels as a fraction of the distance flown between them, and
 // how far the flight is kept from anything solid. The turn rate wanders as

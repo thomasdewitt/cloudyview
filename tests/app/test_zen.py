@@ -231,7 +231,8 @@ def test_the_city_walk_started_in_a_street_takes_that_street():
     """Zen begun low in a street, facing along it and off its centre line,
     flies that street first: it does not rise out of it in the first minute,
     and it is never left with nothing to fly."""
-    r = _node(CITY_FLIGHT_JS, {"seed": 5, "start": [24195.0, 68852.0, 8.0],
+    # 5 m up: under the lamp heads (8.6 m), which reach in over the kerb.
+    r = _node(CITY_FLIGHT_JS, {"seed": 5, "start": [24195.0, 68851.5, 5.0],
                                "azimuth": 265.0, "minutes": 30, "reach": 0.6})
     assert r["hits"] == 0 and r["stuck"] == 0
     assert r["highInFirstMinute"] == 0
