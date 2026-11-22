@@ -11,7 +11,7 @@ import * as K from "../constants.js";
 // it has its own rule (Tutorial.interceptEscape), because one flight step
 // asks for it.
 const TUTORIAL_REFUSED = new Set(
-  ["Tab", "f", "F3", "`", "b", "i", "m", "r", "k", "p", "F12"]);
+  ["Tab", "f", "F3", "`", "b", "i", "m", "r", "k", "p", "F12", "z"]);
 
 /** True when a key pressed on `target` is text being typed into a field. */
 function typingInto(target) {
@@ -90,7 +90,12 @@ export const input = {
       // lock loss is the single source of truth for pausing, and the keydown
       // that caused it is ignored for a moment afterwards.
       this._lockLostAt = performance.now();
-      if (wasCaptured && !this._tabRelease && !this.paused) this.pause();
+      if (wasCaptured && !this._tabRelease && !this.paused) {
+        // Losing the pointer is how Escape arrives outside fullscreen,
+        // and it leaves zen as the key does.
+        this.endZen();
+        this.pause();
+      }
       this._tabRelease = false;
     }, { signal });
 
@@ -101,7 +106,7 @@ export const input = {
     }, { signal });
 
     document.addEventListener("mousemove", (e) => {
-      if (!this.captured) return;
+      if (!this.captured || this._zen) return;
       if (this._discardNextPointerMove) {
         this._discardNextPointerMove = false;
         return;
@@ -111,7 +116,7 @@ export const input = {
     }, { signal });
 
     document.addEventListener("wheel", (e) => {
-      if (!this.captured) return;
+      if (!this.captured || this._zen) return;
       this.camera.scrollSpeed(e.deltaY, performance.now() / 1000);
       this._wake("wheel");
       this.tutorial?.onInput("wheel");
@@ -179,7 +184,8 @@ export const input = {
     // prompt's own "not yet" note; the flight keys below the switch — WASD,
     // Space, Shift — and the wheel are untouched, as is every key here the
     // moment the tutorial ends.
-    if (this.tutorial?.active && TUTORIAL_REFUSED.has(key)) {
+    if (this.tutorial?.active && TUTORIAL_REFUSED.has(key)
+        && !this.tutorial.asksFor(key)) {
       e.preventDefault();
       this.tutorial.refuse();
       return;
@@ -209,14 +215,28 @@ export const input = {
       // menu is closed: Escape from the flight still pauses, which is what a
       // flight step's own interruption rule is written against.
       if (this.tutorial?.interceptEscape()) return;
-      if (this.ui.isOpen) this.ui.back(false);
-      else this.pause();
+      if (this.ui.isOpen) {
+        this.ui.back(false);
+      } else {
+        // Escape from zen leaves zen, and then pauses as it always does.
+        this.endZen();
+        this.pause();
+      }
       return;
     }
     if (this.ui.isOpen) {
       // Fullscreen is the one flight key the open menu keeps: Escape there
       // closes the menu and no longer leaves fullscreen, so F has to.
       if (key === "f" && !typingInto(e.target)) this.toggleFullscreen();
+      return;
+    }
+
+    if (this._zen) {
+      // Zen flies itself. Z leaves it (so does Escape, above), and R
+      // records the flight as it does any other; no other key does
+      // anything.
+      if (key === "z") this.endZen();
+      else if (key === "r") this.toggleTrackRecording();
       return;
     }
 
@@ -242,6 +262,7 @@ export const input = {
       case "i": if (this.ui.allows("ice")) this.toggleIceMode(); return;
       case "m": this.toggleMinimap(); return;
       case "r": this.toggleTrackRecording(); return;
+      case "z": this.startZen(); return;
       // Quality is the research mode's business; in basic the tier is
       // whatever the probe measured, and this key would move it.
       case "k": if (this.ui.allows("quality")) this.toggleLightCache(); return;
@@ -347,6 +368,8 @@ export const input = {
    * camera itself (CITY_START_CAMERA), which is at roof height already.
    */
   tutorialSpawn() {
+    // The walkthrough's flight steps are the reader's to fly.
+    this.endZen();
     if (this.scene.city) {
       // A city camera always carries its tile-frame position; without one
       // there is no street to put it in.

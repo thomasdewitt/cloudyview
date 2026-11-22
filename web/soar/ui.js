@@ -946,6 +946,7 @@ export class UI {
     section("While flying", [
       ["Esc", "menu"],
       ["F", "fullscreen"],
+      ["Z", "zen mode: the flight flies itself — Z or Esc to leave"],
       ["F3 or `", "stats overlay on/off"],
       ["B", app.availableFlyers.length
         ? `flyer — paper dart, swift, off (now: ${app.flyerLabel})`

@@ -179,7 +179,9 @@ export const loop = {
     // needs it where it is going to be drawn.
     if (!this.paused) {
       this.collider?.advance(dt, this.camera);
-      this.camera.move(dt);
+      // In zen mode the flight is zen's; the keys move nothing.
+      if (this._zen) this._zen.flight.step(dt, this.camera);
+      else this.camera.move(dt);
     }
     this.camera.constrain();
     const flyer = this.flyer && this.flyerEnabled ? this.flyer : null;

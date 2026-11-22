@@ -104,6 +104,13 @@ const FLIGHT_STEPS = [
     when: (kind) => kind === "wheel",
   },
   {
+    // Zen takes the controls and the next prompt, Esc, is how they come
+    // back: Escape leaves zen and opens the menu.
+    text: "Press Z for zen mode",
+    key: "z",
+    when: (kind) => kind === "zen",
+  },
+  {
     text: "Hit Esc to view the menu",
     // The pause menu specifically. P also pauses, straight onto the capture
     // panel, and the next step points at a row of the main one.
@@ -473,6 +480,15 @@ export class Tutorial {
   interceptEscape() {
     if (!this.active || !this._menuOpen()) return false;
     return this.refuse();
+  }
+
+  /**
+   * Whether the running step is the one that asks for this shortcut key.
+   * The viewer refuses its shortcuts while a chapter runs (TUTORIAL_REFUSED
+   * in viewer/input.js), all but the one a step is waiting for.
+   */
+  asksFor(key) {
+    return this.step?.key === key;
   }
 
   /**

@@ -26,6 +26,8 @@ export const load = {
    */
   async _releaseField() {
     this._stopLoop();
+    // Zen's flight was laid over this field's bounds or this city.
+    this.endZen();
     if (!this.scene) return;
     try {
       await this.device.queue.onSubmittedWorkDone();

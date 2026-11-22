@@ -14,6 +14,7 @@
 //   ice.js        ice-detection mode
 //   overlays.js   the minimap's mode and which flyer is up
 //   capturing.js  stills, track recording, track video
+//   zen.js        zen mode: the flight that flies itself
 //   commands.js   render metadata and the witness/behold commands
 
 "use strict";
@@ -33,6 +34,7 @@ import { ice } from "./viewer/ice.js";
 import { FLYERS, overlays } from "./viewer/overlays.js";
 import { capturing } from "./viewer/capturing.js";
 import { commands } from "./viewer/commands.js";
+import { zen } from "./viewer/zen.js";
 
 export { autoExposureTarget } from "./viewer/exposure.js";
 
@@ -134,6 +136,9 @@ export class Viewer {
     // be clicked to travel; M cycles through all three.
     this.minimapMode = "corner";
     this.recorder = new TrackRecorder();
+    // Zen mode: null while off, else its flight and what leaving it puts
+    // back (viewer/zen.js).
+    this._zen = null;
     // Built after the first field loads, and null on every path that never
     // gets that far. Everything that notifies it does so optionally.
     this.tutorial = null;
@@ -308,7 +313,7 @@ export class Viewer {
 // sees the same `this`.
 for (const methods of [
   load, autotier, loop, input, settings, exposure,
-  ice, overlays, capturing, commands,
+  ice, overlays, capturing, commands, zen,
 ]) {
   Object.defineProperties(Viewer.prototype,
                           Object.getOwnPropertyDescriptors(methods));

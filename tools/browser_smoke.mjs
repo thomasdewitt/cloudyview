@@ -5,8 +5,8 @@
 // For a day demo (?demo=twpice, research mode) and the cyberpunk city, this
 // loads the scene and then: flies with key events, picks a tier in the
 // Quality panel, backs out with Escape, parks until the picture converges,
-// cycles the minimap and the flyer, lets the loop sleep and wakes it, moves
-// the sun, flips the light cache (K), toggles the periodic
+// cycles the minimap and the flyer, lets the loop sleep and wakes it, flies
+// zen mode (Z) and takes the flight back, moves the sun, flips the light cache (K), toggles the periodic
 // domain, opens every pause-menu panel, reads the terminal commands, saves a
 // still, records a track and renders it to video and saves it, toggles ice
 // mode, and (day only) opens data/TWPICE_subvolume_128x128_5km.nc through the
@@ -281,6 +281,28 @@ async function runScene(name, server, dataBase) {
     t.expect(s.flyerLabel === "paper dart", "the dart back, got " + s.flyerLabel);
     await t.until(() => s.frameIndex > frame, 15000, "frames after the wake");
     return seen.join(" -> ");`);
+
+  await step(name, "Z flies zen mode; W and M do nothing in it; Z gives the flight back", `
+    const map = s.minimapMode, speed = s.camera.speed;
+    t.press("z");
+    t.expect(s.zenOn, "zen on after Z");
+    t.expect(s.minimapMode === "off", "the map away, got " + s.minimapMode);
+    const p0 = [...s.camera.position];
+    await t.until(() => Math.hypot(...s.camera.position.map((v, i) => v - p0[i])) > 5.0,
+                  30000, "zen to fly 5 m");
+    t.key("keydown", "w"); t.press("m");
+    t.expect(!s.camera.keys.has("w"), "W not held in zen");
+    t.expect(s.minimapMode === "off", "M ignored in zen, got " + s.minimapMode);
+    t.key("keyup", "w");
+    await t.until(() => s.camera.elevation === 0, 15000, "a level look");
+    const kind = s._zen.flight.constructor.name;
+    t.expect(kind === (s.scene.city ? "CityZen" : "CloudZen"), "the scene's walk, got " + kind);
+    t.press("z");
+    t.expect(!s.zenOn, "zen off after Z");
+    t.expect(s.minimapMode === map, "the map back to " + map + ", got " + s.minimapMode);
+    t.expect(s.camera.speed === speed, "the flight speed untouched");
+    t.expect(!document.getElementById("viewer").classList.contains("zen"), "no zen class left");
+    return kind + " flew, then gave the flight back";`);
 
   await step(name, "move the sun", `
     const before = s.sunElevation;

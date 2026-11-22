@@ -147,6 +147,12 @@
 /* Only while the mouse is free AND the menu is closed — see _syncChrome. */
 #viewer.captured #toolbar,
 #viewer.menu-open #toolbar { display: none; }
+/* Zen mode: nothing on screen to click, so no toolbar, no hint and no
+   cursor. The cursor comes back for a dialog over a held zen flight, and
+   for the tutorial's box. */
+#viewer.zen #toolbar,
+#viewer.zen #hint { display: none; }
+#viewer.zen:not(.menu-open):not(.tutorial) #view { cursor: none; }
 
 button.chip {
   font-family: var(--ui-font);
