@@ -52,7 +52,7 @@ export const ZEN_LEVEL_S = 0.8;
 // The speed, in grid cells a second: the flight crosses this many of the
 // field's horizontal cells each second, so a fine field is flown slowly and
 // a coarse one fast, and the detail the field resolves goes by at one rate.
-export const ZEN_CLOUD_CELLS_PER_S = 20.0;
+export const ZEN_CLOUD_CELLS_PER_S = 10.0;
 // The tightest turn: a full circle would take this long. The turn rate
 // wanders between that to the left and that to the right.
 export const ZEN_CLOUD_CIRCLE_S = 300.0;
