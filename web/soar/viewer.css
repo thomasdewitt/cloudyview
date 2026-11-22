@@ -451,6 +451,39 @@ button.flip:not(.on) .flip-knob {
   cursor: var(--cursor-dart);
 }
 .segmented button[disabled]:hover { color: var(--ink-dim); }
+/* A segment that cannot be picked from here says why while the pointer is
+   over it. It is greyed by its colours and not by opacity, which would grey
+   the note with it. */
+.segmented button[data-tip] {
+  position: relative;
+  opacity: 1;
+  color: rgba(138, 153, 173, 0.45);
+  border-color: rgba(150, 172, 200, 0.10);
+  background: rgba(150, 175, 210, 0.03);
+}
+.segmented button[data-tip]:hover { color: rgba(138, 153, 173, 0.45); }
+.segmented button[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 0;
+  top: calc(100% + 8px);
+  z-index: 5;
+  width: max-content;
+  max-width: 24rem;
+  padding: 7px 11px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-line);
+  border-radius: var(--control-radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  color: var(--ink);
+  font-family: var(--ui-font);
+  font-size: 12.5px;
+  letter-spacing: 0;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+  pointer-events: none;
+}
 
 /* The mode toggle stands in the pause menu's title line, where the word
    "Paused" was, so it carries the title's weight. */

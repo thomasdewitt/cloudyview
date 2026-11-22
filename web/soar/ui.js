@@ -50,10 +50,9 @@ export const MODES = {
   },
 };
 
-/** Why the other segments are inert while the city is up. */
-const LANDING_ONLY_NOTE =
-  "Cyberpunk mode is chosen on the start page — leave with " +
-  "\"Back to the start page\" to switch.";
+/** What a mode's segment says, hovered, when it cannot be picked in flight. */
+const startPageNote = (spec) =>
+  `Return to start page to change to ${spec.label}.`;
 
 export const DEFAULT_MODE = "basic";
 
@@ -120,9 +119,11 @@ const DOCKED_PANELS = new Set(["quality", "sun", "terminal", "capture", "track"]
 
 /**
  * A row of mutually exclusive chips. An option may carry a third element,
- * `{ disabled, title }` — a segment naming something real that this menu
+ * `{ disabled, tip }` — a segment naming something real that this menu
  * cannot reach has to be visible to be honest about, unclickable to be true,
- * and to say why on hover rather than on a click defined to do nothing.
+ * and to say why on hover rather than on a click defined to do nothing. The
+ * tip is drawn by viewer.css (`.segmented button[data-tip]`), at once and in
+ * the menu's own look, where a `title` waits a second and is the browser's.
  */
 function segmented(options, isOn, onPick) {
   const wrap = el("div", "segmented");
@@ -130,7 +131,10 @@ function segmented(options, isOn, onPick) {
     const b = el("button", null, label);
     if (opts.disabled) {
       b.disabled = true;
-      if (opts.title) b.title = opts.title;
+      if (opts.tip) {
+        b.dataset.tip = opts.tip;
+        b.setAttribute("aria-label", `${label}. ${opts.tip}`);
+      }
     } else {
       b.addEventListener("click", () => onPick(value));
     }
@@ -488,20 +492,17 @@ export class UI {
    * title line.
    */
   _modeToggle() {
-    // A landing-only mode is on the toggle only when it is the one you are
-    // in — it has to say which menu this is — and then it is the only live
-    // segment, with the other two showing what exists and why they are not
-    // reachable from the air. Flying anything else, it is simply not there:
-    // a segment that could never be clicked from this menu would be a
-    // permanent piece of greyed furniture in a menu built to shed rows.
-    const landingOnly = MODES[this.mode].landingOnly;
-    const shown = Object.entries(MODES).filter(
-      ([name, spec]) => !spec.landingOnly || name === this.mode);
+    // All three modes are on the toggle, as on the start page. The ones this
+    // flight cannot change to are there greyed, and say on hover where the
+    // change is made: from the city, research and basic; from anything else,
+    // the city. A mode that is entered from the start page is a different
+    // load, so it is a way in or out of one that the air does not have.
+    const here = Boolean(MODES[this.mode].landingOnly);
     const toggle = segmented(
-      shown.map(([name, spec]) => [
+      Object.entries(MODES).map(([name, spec]) => [
         spec.label, name,
-        landingOnly && name !== this.mode
-          ? { disabled: true, title: LANDING_ONLY_NOTE } : {},
+        name !== this.mode && (here || spec.landingOnly)
+          ? { disabled: true, tip: startPageNote(spec) } : {},
       ]),
       (name) => name === this.mode,
       (name) => { this.setMode(name); this.open("main"); });

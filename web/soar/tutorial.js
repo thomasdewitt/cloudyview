@@ -137,8 +137,7 @@ const MENU_STEPS = [
     // as a paragraph they ran together into one long claim about "modes".
     //
     // Only the first is a switch on the toggle this step points at. The
-    // second says where it is instead, because a reader who has just been
-    // shown a toggle will look for it there and it is not going to be there.
+    // second is on it greyed, so the bullet says where it is chosen.
     menuKey: "mode",
     text: "Try other modes:",
     bullets: [
