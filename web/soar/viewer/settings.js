@@ -310,7 +310,13 @@ export const settings = {
   },
 
   togglePeriodic() {
-    this.renderer.setPeriodic(!this.renderer.periodic);
+    this._setPeriodic(!this.renderer.periodic);
+    this.ui.say(`Periodic domain ${this.renderer.periodic ? "on" : "off"}.`);
+  },
+
+  /** Wrap the field laterally, or stop wrapping it: renderer and camera. */
+  _setPeriodic(on) {
+    this.renderer.setPeriodic(on);
     this.camera.periodic = this.renderer.periodic;
     this.camera.constrain();
     // The baked sun-tau cache marched its shadows under the OLD wrap: baked
@@ -320,7 +326,6 @@ export const settings = {
     // bake lands.
     this.renderer.invalidateLightCache();
     this.renderer.startLightBake(this._viewKwargs());
-    this.ui.say(`Periodic domain ${this.renderer.periodic ? "on" : "off"}.`);
     this._wake("periodic");
   },
 };

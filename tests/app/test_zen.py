@@ -3,15 +3,16 @@
 Over a cloud field: the altitude stays in the band that straddles the bottom
 of the cloud layer and spends about half its time under the cloud where
 there is room under it, the turn is never tighter than a circle in
-ZEN_CLOUD_CIRCLE_S, the look ends level, and in a field that does not wrap
-the flight stays inside it.
+ZEN_CLOUD_CIRCLE_S, the look ends level, and the speed is
+ZEN_CLOUD_CELLS_PER_S of the field's grid cells a second.
 
 Over the city, through the shipped tile with everything that stands in it
-(citylots.js, cityprops.js): the flight keeps to the street grid's centre
-lines and its turns, never comes within a body's reach of anything solid,
-stays between the street and the ceiling, never needs a stretch flown
-without a clear altitude, and comes down into that range when started high
-above it. The street word's reading is held to the lot mirror's.
+(citylots.js, cityprops.js): the flight never comes within a body's reach of
+anything solid and never has to rise out of a place it planned itself into;
+below the buildings' range it is on a street's centre line, flying straight
+along it; it spends something like half its time at street level; and it
+comes down into its range when started high above it. The street word's
+reading is held to the lot mirror's.
 
 Needs node; no GPU.
 """
@@ -63,7 +64,8 @@ def _node(body, spec):
 CLOUD_JS = """
 const cam = new FlightCamera(spec.bmin, spec.bmax, { periodic: spec.periodic });
 cam.elevation = 25;
-const zen = new Z.CloudZen(cam, random);
+const nominal = Z.cloudSpeed(spec.bmin, spec.bmax, spec.shape);
+const zen = new Z.CloudZen(cam, nominal, random);
 const settle = Math.round(240 / DT), steps = Math.round(spec.minutes * 60 / DT);
 const centre = [0, 1].map((i) => 0.5 * (spec.bmin[i] + spec.bmax[i]));
 const half = [0, 1].map((i) => 0.5 * (spec.bmax[i] - spec.bmin[i]));
@@ -87,24 +89,26 @@ for (let k = 0; k < steps; k++) {
 console.log(JSON.stringify({
   band: zen.band, zmin, zmax, under: under / (steps - settle), maxRate, out,
   elevation: cam.elevation, speed: moved, circle: Z.ZEN_CLOUD_CIRCLE_S,
-  nominal: Z.ZEN_CLOUD_SPEED, backRate: Z.ZEN_CLOUD_TURN_BACK_RATE,
+  nominal, cells: Z.ZEN_CLOUD_CELLS_PER_S,
 }));
 """
 
 # The demo set's shapes: a thin deck, a layer on the sea, and a deep one
-# that starts high (web/soar/demos/*/meta.json bmin, bmax).
+# that starts high (web/soar/demos/*/meta.json bmin, bmax, shape_xyz).
 FIELDS = {
-    "dycoms": ([-2.5, -2.5, 537.5], [3197.5, 3197.5, 887.5]),
-    "congestus": ([-5.0, -5.0, 25.0], [20475.0, 20475.0, 3875.0]),
-    "stratified": ([-50.0, -50.0, 7011.4], [102350.0, 102350.0, 14934.0]),
+    "dycoms": ([-2.5, -2.5, 537.5], [3197.5, 3197.5, 887.5], [640, 640, 140]),
+    "congestus": ([-5.0, -5.0, 25.0], [20475.0, 20475.0, 3875.0],
+                  [2048, 2048, 385]),
+    "stratified": ([-50.0, -50.0, 7011.4], [102350.0, 102350.0, 14934.0],
+                   [1024, 1024, 300]),
 }
 
 
 @pytest.mark.parametrize("name", sorted(FIELDS))
 def test_the_cloud_walk_keeps_its_band_and_its_gentle_turn(name):
-    bmin, bmax = FIELDS[name]
+    bmin, bmax, shape = FIELDS[name]
     r = _node(CLOUD_JS, {"seed": 11, "bmin": bmin, "bmax": bmax,
-                         "periodic": True, "minutes": 90})
+                         "shape": shape, "periodic": True, "minutes": 90})
     low, high = r["band"]
     depth = bmax[2] - bmin[2]
     assert high == pytest.approx(bmin[2] + depth / 3)
@@ -117,20 +121,11 @@ def test_the_cloud_walk_keeps_its_band_and_its_gentle_turn(name):
         assert 0.3 < r["under"] < 0.7
     assert r["maxRate"] <= 360.0 / r["circle"] + 1e-6
     assert r["elevation"] == 0.0
+    # So many cells a second, whatever the grid: slow on DYCOMS's 5 m, fast
+    # on the cirrus field's 100 m.
+    cell = (bmax[0] - bmin[0]) / shape[0]
+    assert r["nominal"] == pytest.approx(r["cells"] * cell)
     assert r["speed"] == pytest.approx(r["nominal"], rel=1e-3)
-
-
-@pytest.mark.parametrize("extent", [102400.0, 3200.0])
-def test_the_cloud_walk_stays_in_a_field_that_does_not_wrap(extent):
-    r = _node(CLOUD_JS, {"seed": 5, "bmin": [0.0, 0.0, 500.0],
-                         "bmax": [extent, extent, 900.0],
-                         "periodic": False, "minutes": 90})
-    assert r["out"] < 1.05
-    assert r["maxRate"] <= r["backRate"] + 1e-6
-    # A field too small to turn in at 500 m/s is flown slower.
-    assert r["speed"] <= r["nominal"] * (1 + 1e-3)
-    if extent < 10000.0:
-        assert r["speed"] < 0.2 * r["nominal"]
 
 
 CITY_JS = """
@@ -153,9 +148,12 @@ cam.elevation = -20;
 const zen = new Z.CityZen(cam, lots, random);
 const here = () => [cam.surfacePosition[0], cam.surfacePosition[1],
                     cam.position[2]];
-const steps = Math.round(spec.minutes * 60 / DT), settle = Math.round(20 / DT);
-let prev = here(), hits = 0, offGrid = 0, zmin = Infinity, zmax = -Infinity;
-let maxYaw = 0, lastAz = cam.azimuth, flown = 0, zEnd = 0;
+const steps = Math.round(spec.minutes * 60 / DT), settle = Math.round(120 / DT);
+const BELOW = Z.ZEN_CITY_ALTITUDE_M[0], STREET = Z.ZEN_CITY_STREET_ALTITUDE_M;
+let prev = here(), hits = 0, zmax = -Infinity, zEnd = 0, maxYaw = 0;
+let lastAz = cam.azimuth, flown = 0;
+let low = 0, lowOffStreet = 0, lowTurning = 0, lowOutOfRange = 0, atStreet = 0;
+let highInFirstMinute = 0;
 for (let k = 0; k < steps; k++) {
   zen.step(DT, cam);
   const p = here();
@@ -167,56 +165,84 @@ for (let k = 0; k < steps; k++) {
   if (lots.sweep(prev, p, spec.reach) !== null) hits += 1;
   flown += Math.hypot(p[0] - prev[0], p[1] - prev[1]);
   prev = here();
-  maxYaw = Math.max(maxYaw, Math.abs(fold(cam.azimuth - lastAz)) / DT);
+  const yaw = Math.abs(fold(cam.azimuth - lastAz)) / DT;
   lastAz = cam.azimuth;
-  if (k < settle) continue;
-  // On a street's centre line, or within a turn's radius of a grid node.
-  const off = [0, 1].map((i) => Math.abs(p[i] - Math.round(p[i] / CELL) * CELL));
-  if (Math.min(off[0], off[1]) > 1e-6
-      && Math.max(off[0], off[1]) > Z.ZEN_CITY_TURN_RADIUS_M + 1e-6) offGrid += 1;
-  zmin = Math.min(zmin, p[2]);
-  zmax = Math.max(zmax, p[2]);
   zEnd = p[2];
+  if (k < 60 / DT && p[2] >= BELOW) highInFirstMinute += 1;
+  if (k < settle) continue;
+  maxYaw = Math.max(maxYaw, yaw);
+  zmax = Math.max(zmax, p[2]);
+  if (p[2] <= STREET[1] + 1e-6) atStreet += 1;
+  if (p[2] >= BELOW) continue;
+  // Below the buildings' range: on a grid line that is a street here,
+  // heading along it, not turning, and no lower than the street range.
+  low += 1;
+  const node = [0, 1].map((i) => Math.round(p[i] / CELL));
+  const off = [0, 1].map((i) => Math.abs(p[i] - node[i] * CELL));
+  const alongX = off[1] < off[0];
+  const at = Math.floor(p[alongX ? 0 : 1] / CELL);
+  const street = alongX ? Z.streetFrom(tile, at, node[1], 0)
+                        : Z.streetFrom(tile, node[0], at, 1);
+  if (Math.min(off[0], off[1]) > 1e-6 || !street) lowOffStreet += 1;
+  if (yaw > 1e-6 || Math.abs(fold(cam.azimuth - (alongX ? 90 : 0))) % 180 > 1e-6) {
+    lowTurning += 1;
+  }
+  if (p[2] < STREET[0] - 1e-6) lowOutOfRange += 1;
 }
 console.log(JSON.stringify({
-  hits, offGrid, blocked: zen.blocked, rising: zen.rising, zmin, zmax, zEnd,
-  flown, maxYaw, elevation: cam.elevation, range: Z.ZEN_CITY_ALTITUDE_M,
-  speed: Z.ZEN_CITY_SPEED, yawRate: Z.ZEN_CITY_YAW_RATE,
+  hits, stuck: zen.stuck, rising: zen.rising, zmax, zEnd, flown, maxYaw,
+  low, lowOffStreet, lowTurning, lowOutOfRange, highInFirstMinute,
+  atStreet: atStreet / (steps - settle), elevation: cam.elevation,
+  range: Z.ZEN_CITY_ALTITUDE_M, speed: Z.ZEN_CITY_SPEED,
+  avoid: Z.ZEN_CITY_AVOID_RATES,
 }));
 """
 
 # The cyberpunk start camera's place (constants.js CITY_START_CAMERA), a
-# place by the tile's seam, and downtown among the towers.
+# place by the tile's seam, and a place in the middle of the tile, high.
 CITY_STARTS = {
-    "start camera": ([24240.74, 68827.51, 26.88], 315.6),
-    "tile seam": ([92100.0, 68850.0, 30.0], 90.0),
-    "downtown": ([17393.0, 61646.0, 40.0], 200.0),
+    "start camera": ([24240.74, 68827.51, 60.0], 315.6),
+    "tile seam": ([92100.0, 68850.0, 120.0], 90.0),
+    "mid tile": ([46080.0, 46080.0, 300.0], 10.0),
 }
 
 
 @pytest.mark.parametrize("name", sorted(CITY_STARTS))
-def test_the_city_walk_follows_the_streets_and_touches_nothing(name):
+def test_the_city_walk_curves_above_and_flies_the_streets_straight(name):
     start, azimuth = CITY_STARTS[name]
     r = _node(CITY_FLIGHT_JS, {"seed": 3, "start": start, "azimuth": azimuth,
-                               "minutes": 40, "reach": 0.6})
-    assert r["rising"] is False
+                               "minutes": 60, "reach": 0.6})
     assert r["hits"] == 0
-    assert r["blocked"] == 0
-    assert r["offGrid"] == 0
-    low, high = r["range"]
-    assert low - 1e-6 <= r["zmin"] and r["zmax"] <= high + 1e-6
-    assert r["zmax"] - r["zmin"] > 100.0
-    assert r["flown"] == pytest.approx(r["speed"] * 40 * 60, rel=0.01)
-    assert r["maxYaw"] <= r["yawRate"] + 1e-6
+    assert r["stuck"] == 0 and r["rising"] is False
+    # It does go down to the streets, and what it does there is fly straight
+    # along one.
+    assert r["low"] > 0
+    assert r["lowOffStreet"] == 0
+    assert r["lowTurning"] == 0
+    assert r["lowOutOfRange"] == 0
+    assert 0.25 < r["atStreet"] < 0.75
+    assert r["zmax"] <= r["range"][1] + 1e-6
+    assert r["flown"] == pytest.approx(r["speed"] * 60 * 60, rel=0.01)
+    assert r["maxYaw"] <= max(r["avoid"]) + 1e-6
     assert r["elevation"] == 0.0
+
+
+def test_the_city_walk_started_in_a_street_takes_that_street():
+    """Zen begun low in a street, facing along it and off its centre line,
+    flies that street first: it does not rise out of it in the first minute,
+    and it is never left with nothing to fly."""
+    r = _node(CITY_FLIGHT_JS, {"seed": 5, "start": [24195.0, 68852.0, 8.0],
+                               "azimuth": 265.0, "minutes": 30, "reach": 0.6})
+    assert r["hits"] == 0 and r["stuck"] == 0
+    assert r["highInFirstMinute"] == 0
+    assert r["lowOffStreet"] == 0 and r["lowTurning"] == 0
 
 
 def test_the_city_walk_comes_down_from_above_its_ceiling():
     r = _node(CITY_FLIGHT_JS, {"seed": 9, "start": [24240.0, 68827.0, 2000.0],
-                               "azimuth": 90.0, "minutes": 15, "reach": 0.6})
-    low, high = r["range"]
-    assert r["hits"] == 0 and r["blocked"] == 0
-    assert low <= r["zEnd"] <= high
+                               "azimuth": 90.0, "minutes": 25, "reach": 0.6})
+    assert r["hits"] == 0 and r["stuck"] == 0
+    assert r["zEnd"] <= r["range"][1]
 
 
 def test_the_street_word_is_read_as_the_lot_mirror_reads_it():

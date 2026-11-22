@@ -3,7 +3,7 @@
 
 "use strict";
 
-import { CityZen, CloudZen } from "../zen.js";
+import { CityZen, CloudZen, cloudSpeed } from "../zen.js";
 
 export const zen = {
   /** Whether zen mode is on. It stays on, held still, under a pause. */
@@ -13,21 +13,28 @@ export const zen = {
    * Hand the flight to zen from where the camera is.
    *
    * What zen changes besides the flight is kept, so that leaving puts it
-   * back: the minimap's mode, and fullscreen if zen is what entered it.
-   * The flyer is left as it is.
+   * back: the minimap's mode, fullscreen if zen is what entered it, and the
+   * periodic domain if zen is what turned it on. The flyer is left as it is.
    */
   startZen() {
     let flight;
     try {
       flight = this.scene.city
         ? new CityZen(this.camera, this.collider.city)
-        : new CloudZen(this.camera);
+        : new CloudZen(this.camera, cloudSpeed(
+            this.scene.bmin, this.scene.bmax, this.scene.shape));
     } catch (err) {
       this.ui.say(`Zen mode cannot start here: ${err.message}`, 5);
       return;
     }
     const enteredFullscreen = !document.fullscreenElement;
-    this._zen = { flight, minimapMode: this.minimapMode, enteredFullscreen };
+    // The flight has no edge to turn at, so the field is tiled for it, as
+    // the menu's periodic switch tiles it. A field that is not periodic
+    // shows a straight cloud edge where its two sides meet.
+    const madePeriodic = !this.renderer.periodic;
+    if (madePeriodic) this._setPeriodic(true);
+    this._zen = { flight, minimapMode: this.minimapMode, enteredFullscreen,
+                  madePeriodic };
     this.camera.keys.clear();
     this.minimapMode = "off";
     if (enteredFullscreen) {
@@ -52,6 +59,7 @@ export const zen = {
     if (!was) return;
     this._zen = null;
     this.minimapMode = was.minimapMode;
+    if (was.madePeriodic && this.renderer.periodic) this._setPeriodic(false);
     if (was.enteredFullscreen && document.fullscreenElement) {
       document.exitFullscreen();
     }
