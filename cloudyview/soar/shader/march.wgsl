@@ -211,7 +211,16 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                        * strat1(frame_index, strat_pixel,
                                 STRAT_STREAM_PREMARCH,
                                 STRAT_ALPHA_9);
-    let entry_dt = u.dt_view;
+    // The jitter spans the step the march actually takes at t_near, which
+    // is the distance-LOD step wherever that is the longer (as at the nest
+    // seam below). From outside the box, or above a periodic slab, t_near
+    // can be far past where the LOD takes over (~12 km at Low, ~33 km at
+    // High), and a draw over dt_view alone covered only
+    // dt_view / (t_near * view_lod_tan) of the step. Neighbouring pixels then
+    // sampled nearly the same shells of constant t, and cloud seen from high
+    // above broke into flat terraces with hard edges, worst on a single
+    // moving frame.
+    let entry_dt = max(u.dt_view, t_near * u.view_lod_tan);
     var t = t_near + jitter_on * jitter * jitter_scale * entry_dt;
 
     var transmittance = 1.0;
