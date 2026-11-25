@@ -98,6 +98,9 @@ const CITY_WIN_BRIGHT_MEAN: f32 = 0.875; // E[0.25 + 5 w^7]
 // Streets.
 const CITY_LAMP_SPACING: f32 = 26.0;
 const CITY_LAMP_OFFSET: f32 = 2.5;   // lamp line inset from the block edge
+// How much further than its own lamp line a cross street keeps a lamp row
+// off its centreline (city_lamp_stands).
+const CITY_LAMP_CORNER: f32 = 1.5;
 const CITY_LAMP_SIGMA: f32 = 3.2;    // light-pool radius on the asphalt
 const CITY_LAMP_RADIANCE: f32 = 0.55;
 const CITY_LAMP_COLOR: vec3<f32> = vec3<f32>(1.0, 0.42, 0.12); // sodium
@@ -349,6 +352,32 @@ fn city_lamp_lattice(k: i32) -> vec2<f32> {
 fn city_lamp_station(k: i32, a: f32) -> f32 {
     let l = city_lamp_lattice(k);
     return l.y + round((a - l.y) / l.x) * l.x;
+}
+
+// Whether a lamp stands at the station at along coordinate a: not where its
+// lamp line crosses a cross street. The lattice runs along a street without
+// regard to the streets that cross it, and a station that fell inside one
+// put a mast out in the cross street's carriageway, up to 11.5 m into an
+// avenue. A station stands only where it is at least the cross line's own
+// lamp inset plus CITY_LAMP_CORNER from that line: the lamp rows of two
+// crossing streets stop a metre and a half short of each other, which also
+// clears the kerb's CITY_KERB_R corner arc: on a minor street's lamp line
+// the arc reaches 4.34 m from a minor cross street's centreline and 12.84 m
+// from an avenue's, where the rule keeps 5.0 m and 15.0 m, a mast 30 cm
+// clear of the kerb at the tightest corner (at 1.0 m it touched it).
+// Arithmetic only, so every lamp
+// term can ask it for free without reading the tile's street word; the
+// price is that where a grid line carries no street, a lamp is left out all
+// the same. In the shipped tile's first 300 x 300 blocks the rule leaves out
+// 118,816 of 916,764 masts: 100,157 stood in a carriageway or on the
+// corner arc, 11,771 (1.3% of all masts) by a line with no street on their
+// side, and the rest on the sidewalk inside the margin.
+// Every reader of the lattice asks this: the poles, the pools, the light on
+// walls and steam, the glints, the furniture that keeps clear of a mast,
+// and web/soar/cityprops.js and tools/street_means.py, which restate it.
+fn city_lamp_stands(a: f32) -> bool {
+    let k = i32(round(a / u.tile_cell));
+    return abs(a - f32(k) * u.tile_cell) >= city_lamp_inset(k) + CITY_LAMP_CORNER;
 }
 
 // The glow field: mean lit density over 2^lod blocks, read with the repeat
@@ -1347,6 +1376,9 @@ fn city_street_pools(p: vec2<f32>) -> f32 {
         for (var s: i32 = 0; s < 2; s = s + 1) {
             let lx = bx + select(-inx, inx, s == 1);
             let ly = city_lamp_station(bxi, p.y);
+            if (!city_lamp_stands(ly)) {
+                continue;
+            }
             let d2 = (p.x - lx) * (p.x - lx) + (p.y - ly) * (p.y - ly);
             pool = pool
                 + ax * exp(-d2 / (2.0 * CITY_LAMP_SIGMA * CITY_LAMP_SIGMA));
@@ -1361,6 +1393,9 @@ fn city_street_pools(p: vec2<f32>) -> f32 {
         for (var s: i32 = 0; s < 2; s = s + 1) {
             let ly = by + select(-iny, iny, s == 1);
             let lx = city_lamp_station(byi, p.x);
+            if (!city_lamp_stands(lx)) {
+                continue;
+            }
             let d2 = (p.x - lx) * (p.x - lx) + (p.y - ly) * (p.y - ly);
             pool = pool
                 + ay * exp(-d2 / (2.0 * CITY_LAMP_SIGMA * CITY_LAMP_SIGMA));

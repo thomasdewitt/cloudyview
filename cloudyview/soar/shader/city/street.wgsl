@@ -151,8 +151,8 @@ const CITY_POOL_KNEE: f32 = 0.30;
 // as A s / (1 + B s) in the district's lamp scale s. Street is everything
 // outside the plots; plot is the plot interiors, where only the pools' tails
 // reach (tools/street_means.py).
-const CITY_GROUND_FAR_STREET: vec2<f32> = vec2<f32>(0.0695, 0.2216);
-const CITY_GROUND_FAR_PLOT: vec2<f32> = vec2<f32>(0.0084, 0.1047);
+const CITY_GROUND_FAR_STREET: vec2<f32> = vec2<f32>(0.0627, 0.2171);
+const CITY_GROUND_FAR_PLOT: vec2<f32> = vec2<f32>(0.0083, 0.1047);
 
 // Building line to kerb on the street a plot edge faces. The plot edge alone
 // says which street that is: it sits CITY_STREET_HALF (plus the avenue
@@ -772,6 +772,9 @@ fn city_street_light_g(p: vec3<f32>, n: vec3<f32>, g: f32) -> vec3<f32> {
             let hc = f32(k) * cellm + sg * (inset - CITY_LAMP_ARM);
             for (var jj: i32 = 0; jj < 2; jj = jj + 1) {
                 let ha = lat.y + (j0 + f32(jj)) * lat.x;
+                if (!city_lamp_stands(ha)) {
+                    continue;
+                }
                 let head = select(vec3<f32>(ha, hc, CITY_LAMP_HEAD_Z),
                                   vec3<f32>(hc, ha, CITY_LAMP_HEAD_Z),
                                   along_y);
@@ -861,6 +864,9 @@ fn city_lamp_glint(p: vec3<f32>, dir: vec3<f32>, g: CityGround, fp: f32)
                    + select(-1.0, 1.0, sd == 1) * (inset - CITY_LAMP_ARM);
             for (var jj: i32 = 0; jj < 3; jj = jj + 1) {
                 let ha = lat.y + (j0 + f32(jj)) * lat.x;
+                if (!city_lamp_stands(ha)) {
+                    continue;
+                }
                 let head = select(vec3<f32>(ha, hc, CITY_LAMP_HEAD_Z),
                                   vec3<f32>(hc, ha, CITY_LAMP_HEAD_Z),
                                   along_y);

@@ -12,7 +12,8 @@
 // LAYOUT. A cell owns four KERBS, one per plot edge. Each kerb carries, in
 // its own across-coordinate:
 //   * the lamp line, at the block edge +- CITY_LAMP_OFFSET — the core's
-//     lattice, not a new one. A mast at every lattice point inside the cell,
+//     lattice, not a new one. A mast at every lattice point inside the cell
+//     that stands (city_lamp_stands: none out in a cross street),
 //     with the luminaire arm reaching AWAY from the plot, out over the
 //     roadway, which is where a real one hangs.
 //   * the parking line, CAR_PARK_OFF in from the plot edge (the kerb proper).
@@ -291,6 +292,7 @@ struct cc_streetlife_Side {
     park_c: f32,      // parking line, across coordinate
     plot_sign: f32,   // which way the plot lies from the kerb
     a_min: f32, a_max: f32,   // the cell's extent along the kerb
+    l_min: f32, l_max: f32,   // where along the kerb a lamp may stand
     c_min: f32, c_max: f32,   // the cell's extent across it
     p_min: f32, p_max: f32,   // where along the kerb a car may stand
     park_ok: bool,
@@ -346,6 +348,10 @@ fn cc_streetlife_side(ci: vec2<i32>, cc: CityCell, side: i32)
     s.p_max = s.a_max - CITY_STREET_HALF
             - select(0.0, CITY_AVENUE_EXTRA, city_is_avenue(k1))
             - cc_streetlife_PARK_CLEAR;
+    // city_lamp_stands, for the two cross lines a station here can be
+    // nearest: the cell's own edges.
+    s.l_min = s.a_min + city_lamp_inset(k0) + CITY_LAMP_CORNER;
+    s.l_max = s.a_max - city_lamp_inset(k1) - CITY_LAMP_CORNER;
     // The kerb this parking lane runs along sits on the plot's side of the
     // centreline: + for a -x/-y edge, - for the others. A minor street parks
     // on one side only.
@@ -373,6 +379,11 @@ fn cc_streetlife_nearest_lamp(p: vec2<f32>) -> vec3<f32> {
     let iny = city_lamp_inset(ky);
     let lx = city_lamp_station(ky, p.x);
     let ly = city_lamp_station(kx, p.y);
+    // A station that does not stand (city_lamp_stands) is passed over; if
+    // none of the four does, the pools here are dark too, and the first is
+    // as good a direction as any.
+    let ly_ok = city_lamp_stands(ly);
+    let lx_ok = city_lamp_stands(lx);
     var best = vec2<f32>(bx - inx, ly);
     var bd = 1e30;
     for (var k: i32 = 0; k < 4; k = k + 1) {
@@ -385,6 +396,9 @@ fn cc_streetlife_nearest_lamp(p: vec2<f32>) -> vec3<f32> {
             c = vec2<f32>(lx, by - iny);
         } else {
             c = vec2<f32>(lx, by + iny);
+        }
+        if (!select(lx_ok, ly_ok, k < 2)) {
+            continue;
         }
         let d = dot(c - p, c - p);
         if (d < bd) {
@@ -922,15 +936,17 @@ fn cc_streetlife_kerb(o: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     var t_end = tb;
 
     // Poles, on the core's lamp lattice for this street
-    // (city_lamp_lattice), restricted to those standing wholly inside this
-    // cell.
+    // (city_lamp_lattice), at the stations that stand (city_lamp_stands).
+    // The cross lines nearest a station inside the cell are the cell's own
+    // two edges, so that is the stretch between those lines' insets plus
+    // CITY_LAMP_CORNER, and every pole stands wholly inside this cell.
     if (!near && fp < cc_streetlife_POLE_FAR_FP) {
         let lat = city_lamp_lattice(s.line);
         let sp = lat.x;
         var j0 = i32(ceil((s_lo - 0.45 - lat.y) / sp));
         var j1 = i32(floor((s_hi + 0.45 - lat.y) / sp));
-        j0 = max(j0, i32(ceil((s.a_min + 0.45 - lat.y) / sp)));
-        j1 = min(j1, i32(floor((s.a_max - 0.45 - lat.y) / sp)));
+        j0 = max(j0, i32(ceil((s.l_min - lat.y) / sp)));
+        j1 = min(j1, i32(floor((s.l_max - lat.y) / sp)));
         if (j1 >= j0) {
             let jstart = select(j1, j0, fwd_first);
             let jstep = select(-1, 1, fwd_first);

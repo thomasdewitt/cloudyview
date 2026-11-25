@@ -198,8 +198,8 @@ export function skywaySolids(p0, p1, r, cellM) {
 // (components/streetlife.wgsl, on the core's lamp lattice in city/layout.wgsl)
 //
 // Each of a block's four edges that carries a street has a lamp line, a
-// mast at every station of the street's lattice standing wholly inside the
-// block, its arm reaching out over the roadway to the luminaire; and, where
+// mast at every station of the street's lattice that stands (none out in a
+// cross street; city/layout.wgsl city_lamp_stands), its arm reaching out over the roadway to the luminaire; and, where
 // the street parks on that side, a parking line with slots on a 7 m world
 // lattice, about a third of them holding a car. A pole is three boxes (mast,
 // arm, luminaire housing). A car is the two boxes the renderer draws it as
@@ -212,6 +212,7 @@ export function skywaySolids(p0, p1, r, cellM) {
 // there.
 export const CITY_LAMP_SPACING = 26.0;
 export const CITY_LAMP_OFFSET = 2.5;
+export const CITY_LAMP_CORNER = 1.5;
 export const CITY_SIDEWALK_W = 3.0;
 export const CITY_SIDEWALK_W_AVE = 4.5;
 export const cc_streetlife_POLE_H = 9.0;
@@ -404,9 +405,14 @@ function streetlifeSolids(out, cc, cx, cy, cellM, n) {
   for (let side = 0; side < 4; side++) {
     if (!edgeStreet(cc, side)) continue;
     const s = kerbSide(cx, cy, cc, side, cellM, n);
+    // city_lamp_stands: the stations clear of the two cross streets, which
+    // for a station in this cell are its own edges' lines.
     const [sp, ph] = lampLattice(s.line, n);
-    const j0 = Math.ceil((s.a_min + 0.45 - ph) / sp);
-    const j1 = Math.floor((s.a_max - 0.45 - ph) / sp);
+    const e0 = Math.round(s.a_min / cellM), e1 = Math.round(s.a_max / cellM);
+    const lMin = f(s.a_min + lampInset(e0) + CITY_LAMP_CORNER);
+    const lMax = f(s.a_max - lampInset(e1) - CITY_LAMP_CORNER);
+    const j0 = Math.ceil((lMin - ph) / sp);
+    const j1 = Math.floor((lMax - ph) / sp);
     for (let j = j0; j <= j1; j++) pole(out, s, f(ph + f(j * sp)));
     if (!s.park_ok) continue;
     const k0 = Math.floor(s.p_min / cc_streetlife_SLOT) - 1;

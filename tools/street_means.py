@@ -43,6 +43,7 @@ AVENUE_EXTRA = 10.0
 AVENUE_PERIOD = 8
 LAMP_SPACING = 26.0
 LAMP_OFFSET = 2.5
+LAMP_CORNER = 1.5
 LAMP_SIGMA = 3.2
 POOL_KNEE = 0.30
 
@@ -147,6 +148,12 @@ def lamp_station(k, a):
     return ph + np.round((a - ph) / sp) * sp
 
 
+def lamp_stands(a):
+    """city_lamp_stands: no lamp out in a cross street."""
+    k = np.round(a / CELL)
+    return np.abs(a - k * CELL) >= lamp_inset(k) + LAMP_CORNER
+
+
 def city_rand4(sx, sy):
     """city_rand4: two rounds of pcg2d, as four uniforms."""
     ax, ay = pcg2d(sx, sy)
@@ -234,12 +241,14 @@ def vnoise(px, py, freq, off):
 
 # --- the ground, one cell --------------------------------------------------------
 def pools(x, y):
-    """city_street_pools, verbatim."""
+    """city_street_pools, verbatim (every edge a street, so
+    city_lamp_stands is exact here)."""
     out = np.zeros_like(x)
     bxi = np.round(x / CELL)
     bx = bxi * CELL
     amp = np.where(is_avenue(bxi), 1.6, 1.0)
     ly = lamp_station(bxi, y)
+    amp = np.where(lamp_stands(ly), amp, 0.0)
     for s in (-1.0, 1.0):
         lx = bx + s * lamp_inset(bxi)
         out += amp * np.exp(-((x - lx) ** 2 + (y - ly) ** 2)
@@ -248,6 +257,7 @@ def pools(x, y):
     by = byi * CELL
     amp = np.where(is_avenue(byi), 1.6, 1.0)
     lx = lamp_station(byi, x)
+    amp = np.where(lamp_stands(lx), amp, 0.0)
     for s in (-1.0, 1.0):
         lyy = by + s * lamp_inset(byi)
         out += amp * np.exp(-((x - lx) ** 2 + (y - lyy) ** 2)
