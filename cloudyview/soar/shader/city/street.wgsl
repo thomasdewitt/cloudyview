@@ -704,6 +704,27 @@ fn city_lot_radiance(p: vec3<f32>, cc: CityCell, fp: f32) -> vec3<f32> {
          + alb * (sky + CITY_MOONLIGHT * max(moon.z, 0.0));
 }
 
+// The streets seen from afar, brighter than their pools alone make them.
+// Thomas, 2026-11-25, of photos of Manhattan: the street "should be like 2x
+// to 3x as bright as the high windows" from far away. Measured on the
+// displayed image over downtown (2.5 km up 3 km out, and 4 km up looking
+// down), against facades above 100 m: 1.1-1.2x before this, 1.5-1.9x at a
+// gain of 5, 1.7-2.3x at 10 (in radiance it was already 1.5-2.9x; the
+// display curve and the haze over both take most of it). A stylisation, not photometry: the lamp term is
+// multiplied by a gain that rises from 1 at CITY_STREET_AERIAL_NEAR from the
+// eye to CITY_STREET_AERIAL_GAIN at CITY_STREET_AERIAL_FAR, so a street
+// underfoot is lit as it was and the grid seen across a city glows. Keyed to
+// distance, not the pixel footprint, so it does not change with resolution.
+const CITY_STREET_AERIAL_GAIN: f32 = 10.0;
+const CITY_STREET_AERIAL_NEAR: f32 = 300.0;
+const CITY_STREET_AERIAL_FAR: f32 = 3000.0;
+
+fn city_street_aerial_gain(p: vec3<f32>) -> f32 {
+    let d = length(p - city_camera_origin());
+    return mix(1.0, CITY_STREET_AERIAL_GAIN,
+               smoothstep(CITY_STREET_AERIAL_NEAR, CITY_STREET_AERIAL_FAR, d));
+}
+
 // The street and sidewalk under their lights, from a material already
 // evaluated (the view ray's pass evaluates it once and hands the same one to
 // the wet lobe). The far field's lamp term is the measured mean for the
@@ -720,7 +741,8 @@ fn city_ground_lit(p: vec3<f32>, cc: CityCell, dir: vec3<f32>, fp: f32,
     let fit = select(CITY_GROUND_FAR_PLOT, CITY_GROUND_FAR_STREET, paved);
     let far = CITY_LAMP_COLOR * (fit.x * s / (1.0 + fit.y * s));
     let lamp = mix(near, far, smoothstep(CITY_STREET_LOD_START,
-                                         CITY_STREET_LOD_FULL, fp));
+                                         CITY_STREET_LOD_FULL, fp))
+             * city_street_aerial_gain(p);
     return lamp + city_flood_ground(cc, p.xy, fp)
          + city_storefront_spill(p.xy, cc) * g.alb
          + city_lamp_glint(p, dir, g, fp)
