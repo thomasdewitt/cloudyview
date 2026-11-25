@@ -227,9 +227,9 @@ fn city_storey_lit(cc: CityCell, iv: i32) -> f32 {
 // [its lower edge, its upper edge). So the share is the difference of the
 // clamped draw's distribution at the two edges, and the six shares sum to
 // 1 wherever the edges fall, 1 and past it included.
-fn city_room_band_share(k: i32, lo: f32, hi: f32, bias: f32) -> f32 {
-    let a = select(city_room_band_edge(k - 1, bias), -1e9, k == 0);
-    let b = select(city_room_band_edge(k, bias), 1e9, k == 5);
+fn city_room_band_share(k: i32, lo: f32, hi: f32, pal: vec3<f32>) -> f32 {
+    let a = select(city_room_band_edge(k - 1, pal), -1e9, k == 0);
+    let b = select(city_room_band_edge(k, pal), 1e9, k == 5);
     return city_room_draw_below(b, lo, hi) - city_room_draw_below(a, lo, hi);
 }
 
@@ -265,7 +265,7 @@ fn city_lit_pane(cc: CityCell, refl: vec3<f32>, through: f32,
     var colour = vec3<f32>(0.0);
     var acc = city_win_zero();
     for (var k: i32 = 0; k < 6; k = k + 1) {
-        let share = city_room_band_share(k, lo, hi, cc.palette_bias)
+        let share = city_room_band_share(k, lo, hi, cc.palette)
                     * (1.0 - cyan) + select(0.0, cyan, k == 4);
         if (share <= 0.0) {
             continue;

@@ -118,7 +118,13 @@ MIXTURE = """    {
 # monochrome houses at every coordinate below. |sum of shares - 1| and the
 # mean colour's error against a midpoint walk of the draws.
 SHARES = """    {
-""" + COORDS + """        let bias = a;
+""" + COORDS + """        // The warm bias across the frame, and in its right half a
+        // lean toward each band in turn, up to the most a house has.
+        var bias = vec3<f32>(a, -1.0, 0.0);
+        if (a > 0.5) {
+            bias = vec3<f32>(2.0 * a - 1.0, floor(fract(7.0 * a) * 6.0),
+                             CITY_PALETTE_LEAN_MAX * fract(13.0 * a));
+        }
         var lo = 0.0;
         var hi = 1.0;
         if (b > 0.2) {

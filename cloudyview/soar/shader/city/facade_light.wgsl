@@ -398,21 +398,21 @@ fn city_storefront_glow(cc: CityCell) -> vec3<f32> {
                 * CITY_FLOOR_H / CITY_STORE_H;
     // The shops' mean colour. A mixed house's draws are uniform on [0, 1],
     // so its mean is the bands' colours by their widths, which the
-    // building's bias moves (city_room_band_edge, clamped at 1). A
+    // building's palette moves (city_room_band_edge, clamped at 1). A
     // monochrome house is taken at its draw's centre: exact unless its
     // +-0.04 spread straddles a band's edge. (The street reads this several
     // times a pixel; the share-weighted mean over the spread cost the street
     // view 9%.)
     var colour = vec3<f32>(0.0);
     if (cc.win_mono >= 0.0) {
-        colour = city_room_color(cc.win_mono, cc.palette_bias);
+        colour = city_room_color(cc.win_mono, cc.palette);
     } else {
-        let e = min(vec4<f32>(city_room_band_edge(1, cc.palette_bias),
-                              city_room_band_edge(2, cc.palette_bias),
-                              city_room_band_edge(3, cc.palette_bias),
-                              city_room_band_edge(4, cc.palette_bias)),
+        let e = min(vec4<f32>(city_room_band_edge(1, cc.palette),
+                              city_room_band_edge(2, cc.palette),
+                              city_room_band_edge(3, cc.palette),
+                              city_room_band_edge(4, cc.palette)),
                     vec4<f32>(1.0));
-        let e0 = min(city_room_band_edge(0, cc.palette_bias), 1.0);
+        let e0 = min(city_room_band_edge(0, cc.palette), 1.0);
         colour = city_room_band_colour(0) * e0
                  + city_room_band_colour(1) * (e.x - e0)
                  + city_room_band_colour(2) * (e.y - e.x)

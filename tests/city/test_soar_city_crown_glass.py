@@ -43,7 +43,7 @@ PROBE = """    {
         let hs = city_rand4(cc.seed);
         // Half the houses monochrome, across the palette.
         cc.win_mono = select(-1.0, hs.x, hs.y < 0.5);
-        cc.palette_bias = hs.z;
+        cc.palette = vec3<f32>(hs.z, -1.0, 0.0);
         // A crown three storeys tall on a 36 m roof, 16 m wide.
         let f = city_face_make(cc, vec3<f32>(0.0, 0.0, 36.0),
                                vec3<f32>(16.0, 12.0, 46.8), 0,

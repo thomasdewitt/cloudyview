@@ -615,7 +615,7 @@ fn city_window_rated(cc: CityCell, f: CityFace, iu: i32, iv: i32,
         if (cc.win_mono >= 0.0) {
             cdraw = clamp(cc.win_mono + (w.wh.y - 0.5) * 0.08, 0.0, 1.0);
         }
-        w.e = city_room_color(cdraw, cc.palette_bias)
+        w.e = city_room_color(cdraw, cc.palette)
               * (CITY_ROOM_RADIANCE * bright);
     }
     return w;
@@ -1159,7 +1159,7 @@ fn city_pent_window(cc: CityCell, f: CityFace, iu: i32, iv: i32) -> CityWin {
 
 fn city_pent_colour(cc: CityCell) -> vec3<f32> {
     if (cc.win_mono >= 0.0) {
-        return city_room_color(cc.win_mono, cc.palette_bias);
+        return city_room_color(cc.win_mono, cc.palette);
     }
     return CITY_PENT_COL;
 }

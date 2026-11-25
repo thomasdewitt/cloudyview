@@ -1369,7 +1369,7 @@ fn cc_rooftopworks_sky_deck(cc: CityCell, sk: cc_rooftopworks_Sky,
     }
     var col = CITY_PALETTE_MEAN;
     if (cc.win_mono >= 0.0) {
-        col = city_room_color(cc.win_mono, cc.palette_bias);
+        col = city_room_color(cc.win_mono, cc.palette);
     }
     let pane_rad = col * cc_rooftopworks_SKY_RAD;
     let span = max(2.0 * hb.x / sk.pitch.x, 2.0 * hb.y / sk.pitch.y);
@@ -1909,7 +1909,7 @@ fn cc_rooftopworks_dark(h: CityHit, albedo: f32) -> vec3<f32> {
 // The house colour, where the building has one; cool white otherwise.
 fn cc_rooftopworks_trim_color(cc: CityCell) -> vec3<f32> {
     if (cc.win_mono >= 0.0) {
-        return city_room_color(cc.win_mono, cc.palette_bias);
+        return city_room_color(cc.win_mono, cc.palette);
     }
     return cc_rooftopworks_TRIM_COOL;
 }

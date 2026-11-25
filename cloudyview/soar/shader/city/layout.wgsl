@@ -94,6 +94,13 @@ const CITY_ROOM_RADIANCE: f32 = 2.4;
 // lamps' and the rooms' spill on props, reflections, rooftops).
 const CITY_PALETTE_MEAN: vec3<f32> = vec3<f32>(1.0, 0.55, 0.25);
 const CITY_WIN_BRIGHT_MEAN: f32 = 0.875; // E[0.25 + 5 w^7]
+// A mixed house's lean (city_room_band_edge): the share of its windows
+// moved to one band, drawn as LEAN_MAX u^2 (median 0.15, a quarter of
+// houses past 0.30), and which band, by these cumulative odds over
+// tungsten, amber, warm LED, fluorescent, cyan and magenta.
+const CITY_PALETTE_LEAN_MAX: f32 = 0.6;
+const CITY_PALETTE_LEAN_ODDS: vec4<f32> = vec4<f32>(0.20, 0.40, 0.55, 0.75);
+const CITY_PALETTE_LEAN_ODDS_CYAN: f32 = 0.85;
 
 // Streets.
 const CITY_LAMP_SPACING: f32 = 26.0;
@@ -409,7 +416,9 @@ struct CityCell {
     mast_min: vec3<f32>, mast_max: vec3<f32>,
     seed: vec2<u32>,
     lit_frac: f32,
-    palette_bias: f32,
+    // The room palette's lean (city_room_band_edge): x the warm bias,
+    // y the band the building leans to (-1: none), z how far.
+    palette: vec3<f32>,
     store_draw: f32,
     plot_min: vec2<f32>, plot_max: vec2<f32>,
     // The architecture (see the archetype block in city_cell): 0 slab /
@@ -538,7 +547,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         (0.14 + 0.55 * r4c.x * r4c.x)
             * mix(0.55, 1.5, smoothstep(0.05, 0.50, c.density)),
         0.40);
-    c.palette_bias = r4c.y;
+    c.palette = vec3<f32>(r4c.y, -1.0, 0.0);
     c.store_draw = r4c.z;
     c.tiers = 1;
     c.has_mast = false;
@@ -594,7 +603,7 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.pane_lo = vec2<f32>(0.30, 0.45);
         c.pane_hi = vec2<f32>(0.70, 0.80);
         c.win_mono = -1.0;
-        c.palette_bias = min(c.palette_bias * 1.4 + 0.1, 1.0);
+        c.palette.x = min(c.palette.x * 1.4 + 0.1, 1.0);
         c.lit_frac = CITY_INDUSTRY_LIT_FRAC * (0.3 + 1.4 * r4c.x);
         return c;
     }
@@ -907,12 +916,12 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
         c.win_pitch = 2.8 * (0.85 + 0.40 * r4e.y);
         c.pane_lo = vec2<f32>(0.05, 0.08);
         c.pane_hi = vec2<f32>(0.95, 0.94);
-        c.palette_bias = c.palette_bias * 0.5;   // cooler house spectrum
+        c.palette.x = c.palette.x * 0.5;   // cooler house spectrum
     } else if (style == 4) {   // punched: small openings in a lot of wall
         c.win_pitch = 2.6 * (0.85 + 0.40 * r4e.y);
         c.pane_lo = vec2<f32>(0.30, 0.38);
         c.pane_hi = vec2<f32>(0.70, 0.80);
-        c.palette_bias = min(c.palette_bias * 1.4 + 0.1, 1.0); // warmer
+        c.palette.x = min(c.palette.x * 1.4 + 0.1, 1.0); // warmer
     } else {                   // grid: the founding lattice
         c.win_pitch = 3.4 * (0.85 + 0.40 * r4e.y);
         c.pane_lo = vec2<f32>(0.14, 0.28);
@@ -924,6 +933,17 @@ fn city_cell(ci: vec2<i32>) -> CityCell {
     let mono_draw = city_rand4(
         c.seed ^ vec2<u32>(0x3c6ef372u, 0xa54ff53au));
     c.win_mono = select(-1.0, mono_draw.y, mono_draw.x < 0.20);
+    // Every other house leans toward one band of the palette, by its own
+    // amount: a pinker tower beside a whiter one, so the colour balance
+    // varies building to building at range and not only window to window
+    // (Thomas, 2026-11-25: "the pink probability, say, should be higher
+    // on one building overall than the next").
+    if (c.win_mono < 0.0) {
+        let lean = city_rand4(
+            c.seed ^ vec2<u32>(0x2545f491u, 0x9e3779b9u));
+        c.palette.y = f32(city_palette_lean_band(lean.x));
+        c.palette.z = CITY_PALETTE_LEAN_MAX * lean.y * lean.y;
+    }
     // Widen the occupancy spread too: some towers near-dark, some ablaze,
     // so neighbours separate at range by brightness as well as texture.
     c.lit_frac = clamp(
@@ -1319,13 +1339,14 @@ fn city_window_color(draw: f32, bias: f32) -> vec3<f32> {
 
 // A lit room's colour: what the light inside a window is. Incandescent and
 // sodium interiors dominate a city's night; warm LED, cool fluorescent and
-// the odd neon are the few. The building's palette_bias leans the warm share
-// (a mixed house draws freely; city_window_rated keeps a monochrome house
-// near its one draw). Its mean is about (0.97, 0.59, 0.32). Shops draw from
-// it too; signs and other lit dressing draw from city_window_color instead.
-fn city_room_color(draw: f32, bias: f32) -> vec3<f32> {
+// the odd neon are the few. The building's palette (CityCell.palette) leans
+// the warm share and then one band (a mixed house draws freely;
+// city_window_rated keeps a monochrome house near its one draw). Unleaned,
+// its mean is about (0.97, 0.59, 0.32). Shops draw from it too; signs and
+// other lit dressing draw from city_window_color instead.
+fn city_room_color(draw: f32, pal: vec3<f32>) -> vec3<f32> {
     for (var k: i32 = 0; k < 5; k = k + 1) {
-        if (draw < city_room_band_edge(k, bias)) {
+        if (draw < city_room_band_edge(k, pal)) {
             return city_room_band_colour(k);
         }
     }
@@ -1333,17 +1354,36 @@ fn city_room_color(draw: f32, bias: f32) -> vec3<f32> {
 }
 
 // The palette's bands: band k is drawn below its upper edge and at or
-// above the one before; the last runs to 1.
-fn city_room_band_edge(k: i32, bias: f32) -> f32 {
-    let cut = 0.60 + 0.20 * (bias - 0.5);
+// above the one before; the last runs to 1. pal.x moves the warm cut; a
+// lean of pal.z toward band pal.y then gives that band pal.z of the draws
+// and scales the rest by 1 - pal.z (the edges, clamped at 1, mixed with a
+// step at the leaned band). Unleaned, the edges are exactly the bias's.
+fn city_room_band_edge(k: i32, pal: vec3<f32>) -> f32 {
+    let cut = 0.60 + 0.20 * (pal.x - 0.5);
+    var e = 1e9;
     switch k {
-        case 0: { return cut; }
-        case 1: { return cut + 0.22; }
-        case 2: { return cut + 0.32; }
-        case 3: { return cut + 0.36; }
-        case 4: { return cut + 0.38; }
+        case 0: { e = cut; }
+        case 1: { e = cut + 0.22; }
+        case 2: { e = cut + 0.32; }
+        case 3: { e = cut + 0.36; }
+        case 4: { e = cut + 0.38; }
         default: { return 1e9; }
     }
+    if (pal.z <= 0.0) {
+        return e;
+    }
+    let step = select(0.0, 1.0, f32(k) >= pal.y);
+    return mix(min(e, 1.0), step, pal.z);
+}
+
+// The band a house leans to, from a uniform draw (CITY_PALETTE_LEAN_ODDS:
+// 20% tungsten, 20% amber, 15% warm LED, 20% fluorescent, 10% cyan, 15%
+// magenta).
+fn city_palette_lean_band(u01: f32) -> i32 {
+    let o = CITY_PALETTE_LEAN_ODDS;
+    return select(0, 1, u01 >= o.x) + select(0, 1, u01 >= o.y)
+         + select(0, 1, u01 >= o.z) + select(0, 1, u01 >= o.w)
+         + select(0, 1, u01 >= CITY_PALETTE_LEAN_ODDS_CYAN);
 }
 
 fn city_room_band_colour(k: i32) -> vec3<f32> {
