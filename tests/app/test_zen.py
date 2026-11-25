@@ -128,6 +128,52 @@ def test_the_cloud_walk_keeps_its_band_and_its_gentle_turn(name):
     assert r["speed"] == pytest.approx(r["nominal"], rel=1e-3)
 
 
+DART_JS = """
+import { Dart } from "%(soar)s/dart.js";
+// The dart's flight dynamics without its GPU half: Dart.update reads and
+// writes only these fields (flyer.js's constructor sets them beside the
+// buffers and pipelines, which need a device).
+const dart = Object.assign(Object.create(Dart.prototype), {
+  position: [0, 0, 0], heading: 0, course: 0, viewElevation: 0, bank: 0,
+  pitch: 0, _speed: 0, _vz: 0, _clock: 0, _prevOrigin: null, _knock: null,
+  distance: 2.6, drop: 0.3, wingFlex: 0, keelSway: 0, wobblePhase: 0,
+  wobbleAmp: 0, flutterPhase: 0, flutterAmp: 0 });
+const cam = new FlightCamera(spec.bmin, spec.bmax, { periodic: true });
+cam.position = [spec.bmax[0] - 200, 0.5 * (spec.bmin[1] + spec.bmax[1]), 700];
+cam.azimuth = 80;
+cam.elevation = 0;
+const zen = new Z.CloudZen(cam, Z.cloudSpeed(spec.bmin, spec.bmax, spec.shape),
+                           random);
+let wraps = 0, maxBank = 0, maxStep = 0, last = [...cam.position];
+for (let k = 0; k < Math.round(spec.minutes * 60 / DT); k++) {
+  zen.step(DT, cam);
+  const before = dart.course;
+  dart.update(DT, cam);
+  if ([0, 1].some((i) => Math.abs(cam.position[i] - last[i]) > 1000)) wraps += 1;
+  last = [...cam.position];
+  if (k < 60) continue;
+  maxBank = Math.max(maxBank, Math.abs(dart.bank));
+  maxStep = Math.max(maxStep, Math.abs(fold(dart.course - before)));
+}
+console.log(JSON.stringify({ wraps, maxBank, maxStep }));
+""" % {"soar": SOAR}
+
+
+def test_the_dart_crosses_the_periodic_wrap_without_a_kick():
+    """The camera's x and y fold at the domain's faces; the dart's course
+    and bank come from the camera's motion, which must not see the fold.
+    Measured before the fix: a 10 degree course jump in one frame at every
+    wrap and the bank rung to 8 degrees, a kick sideways."""
+    bmin, bmax, shape = FIELDS["dycoms"]
+    r = _node(DART_JS, {"seed": 4, "bmin": bmin, "bmax": bmax,
+                        "shape": shape, "minutes": 5})
+    assert r["wraps"] >= 3
+    # The zen turn is at most 1.2 degrees a second: well under a degree of
+    # bank, and a course that moves a fiftieth of a degree a frame.
+    assert r["maxBank"] < 1.0
+    assert r["maxStep"] < 0.05
+
+
 CITY_JS = """
 const meta = JSON.parse(readFileSync("%(tile)s/meta.json", "utf8"));
 const b = readFileSync("%(tile)s/fif_mip0.bin");

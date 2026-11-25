@@ -462,11 +462,20 @@ export class Flyer {
       this.viewElevation = camera.elevation;
       return null;
     }
-    const vel = [
-      (origin[0] - this._prevOrigin[0]) / dt,
-      (origin[1] - this._prevOrigin[1]) / dt,
-      (origin[2] - this._prevOrigin[2]) / dt,
-    ];
+    // A periodic camera folds x and y at the domain's extent (constrain()),
+    // so the frame that crosses a face moves by the step less a whole
+    // domain width. Taken as it stands, that is a velocity of the extent
+    // over dt pointing backwards: one frame's course swings toward the
+    // reverse and the bank rings off it, a kick sideways at every wrap.
+    // The step is folded back to the near copy.
+    const d = [0, 1, 2].map((i) => origin[i] - this._prevOrigin[i]);
+    if (camera.periodic && camera.bmin && camera.bmax) {
+      for (const i of [0, 1]) {
+        const e = camera.bmax[i] - camera.bmin[i];
+        d[i] -= e * Math.round(d[i] / e);
+      }
+    }
+    const vel = [d[0] / dt, d[1] / dt, d[2] / dt];
     this._prevOrigin = [...origin];
     const ks = 1.0 - Math.exp(-dt / tauSpeed);
     this._speed += (Math.hypot(vel[0], vel[1], vel[2]) - this._speed) * ks;
