@@ -4,7 +4,7 @@
 //
 //   node tools/flight_quality.mjs --web web [--cdp 9333] [--demo twpice|cyberpunk]
 //        [--tiers low,minimal] [--paths cruise,strafe,pan] [--size 1280x720]
-//        [--frames 90] [--every 15] [--fps 60] [--query "k=v&k=v"]
+//        [--frames 90] [--every 15] [--fps 60] [--scale S] [--query "k=v&k=v"]
 //        [--set "renderer.prop=value;..."] [--save DIR] [--json]
 //
 // The live loop is held off (the viewer's capture flag) and drawFrame is
@@ -25,6 +25,9 @@
 // and per path the mean of each, plus ms/frame for the flight (GPU time for
 // `--frames` frames without the read-backs, fenced once at the end).
 //
+// --scale flies the tier at another render scale than its own (the
+// reference is still the tier's sampling at scale 1): what a tier would look
+// like marching fewer or more pixels.
 // --set assigns properties on the viewer (`window.soar`) after the tier is
 // chosen, for A/B without a code change: "renderer.motionBlendAlpha=0.3".
 // --save writes path-tier-NNN-{flight,ref}.png.
@@ -48,6 +51,7 @@ const frames = Number(option("--frames", "90"));
 const every = Number(option("--every", "15"));
 const fps = Number(option("--fps", "60"));
 const query = option("--query", "");
+const flightScale = option("--scale", null);
 const sets = option("--set", "");
 const saveDir = option("--save", null);
 const asJson = argv.includes("--json");
@@ -101,6 +105,7 @@ try {
   if (!asJson) {
     console.log(`flight quality: ${demo}, ${w}x${h}, ${frames} frames at ` +
                 `${fps} fps (${adapter})${sets ? `, set ${sets}` : ""}` +
+                `${flightScale ? `, scale ${flightScale}` : ""}` +
                 `${query ? `, query ${query}` : ""}`);
   }
 
@@ -121,6 +126,9 @@ try {
         const R = s.renderer;
         try {
           s.setQualityTier(${JSON.stringify(tier)});
+          if (${JSON.stringify(flightScale)} !== null) {
+            s.setRenderScale(Number(${JSON.stringify(flightScale)}));
+          }
           for (const kv of ${JSON.stringify(sets)}.split(";").filter(Boolean)) {
             const [key, value] = kv.split("=");
             const parts = key.trim().split(".");
