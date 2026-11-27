@@ -252,6 +252,44 @@ fn ocean_sky_reflection(dir: vec3<f32>, sun: vec3<f32>, slope: vec2<f32>,
 // glint, and the Lambertian water body, then haze toward the horizon colour.
 // `sun_shadow` is the direction drawn on the solar disc and serves only the
 // cloud-shadow march; every shading term keeps the disc centre.
+// Optical depth from a point on the water toward the sun, from the light
+// cache (LIGHT_CACHE). The water is below the field's box, and the cache
+// holds, at each of its texels, the optical depth from there to the sun. So
+// the sun ray is followed to where it enters the box and the cache is read
+// just inside: at the height of the lowest texel centres when it enters
+// through the floor, which is where the cache's first real values are. The
+// cloud between the entry and that point, at most half a cache texel of it,
+// is added from one sample of the field.
+//
+// The cached value is for the centre of the sun's disc, so the shadow's
+// edge is as soft as the cache's texels and no softer; the marched shadow
+// draws on the disc and has a penumbra.
+fn ocean_sun_tau_cached(hit: vec3<f32>, sun: vec3<f32>) -> f32 {
+    var t_in: f32;
+    if (PERIODIC_DOMAIN) {
+        // Tiled: the sun is above the horizon and the ray enters through the
+        // floor, or starts inside the slab.
+        if (hit.z >= u.bmax.z) {
+            return 0.0;
+        }
+        t_in = max((u.bmin.z - hit.z) / sun.z, 0.0);
+    } else {
+        let span = ray_box(hit, safe_inv_dir(sun));
+        if (span.x > span.y || span.y <= 0.0) {
+            return 0.0;
+        }
+        t_in = max(span.x, 0.0);
+    }
+    // Half a cache texel's height above the entry, along the ray. The
+    // cache's width is the field's z.
+    let texel_dz = (u.bmax.z - u.bmin.z)
+        / f32(textureDimensions(light_tau, 0).x);
+    let lift = 0.5 * texel_dz / max(sun.z, 0.05);
+    let entry = hit + t_in * sun;
+    return sample_light_cache(entry + lift * sun).x
+        + sample_sigma(entry + 0.5 * lift * sun) * lift;
+}
+
 fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
                sun_shadow: vec3<f32>, t_hit: f32,
                jit: f32) -> vec3<f32> {
@@ -306,8 +344,18 @@ fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
         // @domain: a fraction of a variance: >= 0
         sqrt(0.5 * OCEAN_SLOPE_RESOLVED_FRACTION * sea_variance));
 
-    let tau_ocean = light_march_tau(hit, sun_shadow, t_hit * u.light_lod_tan,
-                                    jit);
+    // The cloud's shadow on the water. Where cloud samples read the sun's
+    // optical depth from the light cache, so does the water: a march from
+    // every pixel of sea up through the whole field was most of the frame
+    // wherever the sea showed, on tiers whose clouds no longer march to the
+    // sun at all.
+    var tau_ocean: f32;
+    if (LIGHT_CACHE) {
+        tau_ocean = ocean_sun_tau_cached(hit, sun);
+    } else {
+        tau_ocean = light_march_tau(hit, sun_shadow,
+                                    t_hit * u.light_lod_tan, jit);
+    }
     let t_sun_ocean = exp(-tau_ocean);
 
     // Sun glint: a GGX lobe tinted by the beam colour, about the footprint's
