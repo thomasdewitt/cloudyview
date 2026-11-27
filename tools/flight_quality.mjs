@@ -152,6 +152,13 @@ try {
           applySets();
           s.setQualityTier(${JSON.stringify(tier)});
           applySets();
+          // The exposure is held for the run, at what the tier choice just
+          // reset it to. Every tier but Minimal turns auto-exposure on, and
+          // a meter reading the live page started before this run lands
+          // whenever the GPU gets to it: on a slow one that is in the middle
+          // of the flight, which then has one exposure before it and another
+          // after, and references at the second.
+          s.setAutoExposure(false, { byHand: false });
           if (${JSON.stringify(flightScale)} !== null) {
             s.setRenderScale(Number(${JSON.stringify(flightScale)}));
           }
@@ -325,7 +332,7 @@ try {
           }
           R.setRenderScale(flightScale);
           R.reproject.on = reprojectOn;
-          return { msPerFrame, frames: out, film,
+          return { msPerFrame, frames: out, film, exposure: s.exposure,
                    renderSize: [R._targets?.w, R._targets?.h] };
         } finally {
           readback.destroy();
@@ -351,6 +358,7 @@ try {
                               `${f.rmse.toFixed(2)} sharp ${f.sharp.toFixed(2)}`).join(" | "));
       }
       const row = { demo, tier, path: pathName, ms: +r.msPerFrame.toFixed(2),
+                    exposure: r.exposure,
                     rmse: +mean("rmse").toFixed(3), edge: +mean("edge").toFixed(3),
                     sharp: +mean("sharp").toFixed(3),
                     flick: +mean("flick").toFixed(3), frames: r.frames };
