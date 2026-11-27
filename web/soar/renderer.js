@@ -12,6 +12,9 @@ import { packUniforms, sceneKey, keysEqual, renderTargetSize, meterSize, SLOT,
          motionAlphaForDt, sceneClock } from "./uniforms.js";
 import { guardAllocation, retireAfterSubmittedWork } from "./gpu.js";
 import { specializeShader, shaderVariantKey } from "./shader.js";
+import { GUIDE_FORMAT, HISTORY_AUX_FORMAT, RESOLVE_UNIFORM_FLOATS,
+         resolveShader, cameraDelta, defaultReprojection,
+         packResolveUniforms } from "./reproject.js";
 
 // Frame-index spacing between the samples of one frame. The index seeds the
 // jitter and the dither, and the viewer's own index steps by 1 per frame, so
@@ -265,10 +268,19 @@ export class Renderer {
    *  surfacePeriod, clockPeriod, oceanMaxLod}. oceanView is binding 3, the
    *  surface's tile (the ocean's normals, the city's density).
    */
-  constructor(device, shaders, scene, { canvasFormat, lensSource }) {
+  constructor(device, shaders, scene,
+              { canvasFormat, lensSource, mathSource }) {
     if (typeof lensSource !== "string") {
       throw new Error("Renderer needs lensSource, lens.wgsl's text.");
     }
+    if (typeof mathSource !== "string") {
+      throw new Error("Renderer needs mathSource, math.wgsl's text.");
+    }
+    // Reprojected history (reproject.js): the settings, and the history
+    // itself once a moving frame has needed it (_historyFor).
+    this.reproject = defaultReprojection();
+    this.historyScaleOverride = null;
+    this._history = null;
     this.device = device;
     // Each surface's module source (shader.js loadShaders).
     this.shaders = shaders;
@@ -497,12 +509,46 @@ export class Renderer {
       ],
     });
 
+    // The reprojection pass (reproject.js): this frame's samples and guide,
+    // and the previous history's two attachments.
+    this.resolveUniformBuf = device.createBuffer({
+      label: "soar-resolve-uniforms",
+      size: RESOLVE_UNIFORM_FLOATS * 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this._resolveUniforms = new Float32Array(RESOLVE_UNIFORM_FLOATS);
+    const unfilterable = (binding) => ({
+      binding, visibility: GPUShaderStage.FRAGMENT,
+      texture: { sampleType: "unfilterable-float", viewDimension: "2d" },
+    });
+    this.resolveLayout = device.createBindGroupLayout({
+      label: "resolve",
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
+        unfilterable(1), unfilterable(2), unfilterable(3), unfilterable(4),
+      ],
+    });
+    const resolveModule = device.createShaderModule({
+      label: "resolve", code: resolveShader(mathSource),
+    });
+    this.resolvePipeline = device.createRenderPipeline({
+      label: "resolve",
+      layout: device.createPipelineLayout({
+        bindGroupLayouts: [this.resolveLayout],
+      }),
+      vertex: { module: resolveModule, entryPoint: "vs_main" },
+      fragment: { module: resolveModule, entryPoint: "fs_main",
+                  targets: [{ format: ACCUM_FORMAT },
+                            { format: HISTORY_AUX_FORMAT }] },
+      primitive: { topology: "triangle-list" },
+    });
+
     const accumModule = device.createShaderModule({ code: ACCUM_SHADER });
     const presentModule = device.createShaderModule({
       code: presentShader(lensSource),
     });
     this.presentModule = presentModule;
-    this._shaderModules = [accumModule, presentModule];
+    this._shaderModules = [accumModule, presentModule, resolveModule];
     this.accumPipeline = device.createRenderPipeline({
       layout: device.createPipelineLayout({
         bindGroupLayouts: [this.accumLayout],
@@ -900,13 +946,17 @@ export class Renderer {
    * inherits here rather than threading it; it is constant for a
    * renderer's whole life, and in every key.
    */
-  _shaderSpec({ toneMap = true, lighting = this.lighting } = {}) {
+  _shaderSpec({ toneMap = true, lighting = this.lighting,
+                motionGuide = this.reproject.on } = {}) {
     return {
       periodic: this.periodic,
       nested: Boolean(this.scene.nested),
       toneMap,
       surface: this.scene.city ? "city" : "ocean",
       lightCache: lighting.lightCache,
+      // With reprojection on, every march of the picture writes the guide,
+      // parked or flying, so a session compiles one march and not two.
+      motionGuide,
     };
   }
 
@@ -925,8 +975,10 @@ export class Renderer {
 
   /** The march pipeline for `lighting` at the current specialization. */
   _rayPipeline(targetFormat, lighting) {
-    return this._pipeline("fs_main", targetFormat,
-                          this._shaderSpec({ lighting }));
+    const spec = this._shaderSpec({ lighting });
+    return this._pipeline(
+      "fs_main", spec.motionGuide ? [targetFormat, GUIDE_FORMAT] : targetFormat,
+      spec);
   }
 
   /** Whether this scene's opaque surface is traced by the pre-pass. */
@@ -1151,7 +1203,7 @@ export class Renderer {
         await this.device.queue.onSubmittedWorkDone();
         for (const old of this._targetPool.values()) {
           old.sample.destroy(); old.accumA.destroy(); old.accumB.destroy();
-          old.live?.destroy();
+          old.live?.destroy(); old.guide?.destroy();
           for (const tex of old.surface?.textures ?? []) tex.destroy();
         }
         this._targetPool.clear();
@@ -1200,6 +1252,9 @@ export class Renderer {
   // --- accumulation -------------------------------------------------------
 
   _resetAccumulation() {
+    // Whatever restarts the average also ends the history's validity: it
+    // holds frames of a scene, a size or a sampling that no longer applies.
+    if (this._history) this._history.valid = false;
     this._accumKey = null;
     this._accumCount = 0;
     this._accumIndex = 0;
@@ -1277,6 +1332,139 @@ export class Renderer {
     this._accumLastOrigin = origin;
     this._accumLastForward = forward;
     return { prevWeight, sampleWeight, nextCount, subpixel, jitterScale };
+  }
+
+  // --- reprojected history (reproject.js) ---------------------------------
+
+  /** The history's size for an output and a march size: the tier's
+   *  historyScale of the output, never smaller than the march. */
+  historySize(outputSize, renderSize) {
+    const scale = this.historyScaleOverride
+      ?? K.QUALITY_PRESETS[this.qualityTier].historyScale;
+    const size = renderTargetSize(outputSize, Math.min(1.0, scale));
+    return [Math.max(size[0], renderSize[0]), Math.max(size[1], renderSize[1])];
+  }
+
+  /** The march's guide target for a target set, made on first need. */
+  _ensureGuideTarget(targets) {
+    targets.guide ??= this.device.createTexture({
+      label: `soar-guide-${targets.w}x${targets.h}`,
+      size: [targets.w, targets.h], format: GUIDE_FORMAT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+  }
+
+  /**
+   * The history for a size: two colour textures and two aux textures,
+   * ping-ponged. One size is kept; a different one replaces it (an output
+   * resize, a tier change), which is rare enough to wait out the queue for,
+   * as _targetsFor does before it destroys.
+   */
+  _historyFor(w, h) {
+    const old = this._history;
+    if (old && old.w === w && old.h === h) return old;
+    if (old) {
+      const dead = [...old.color, ...old.aux];
+      this.device.queue.onSubmittedWorkDone().then(() => {
+        for (const tex of dead) tex.destroy();
+      });
+    }
+    const make = (label, format) => this.device.createTexture({
+      label: `${label}-${w}x${h}`, size: [w, h], format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+           | GPUTextureUsage.COPY_SRC,
+    });
+    this._history = {
+      w, h, index: 0, valid: false,
+      color: [make("soar-history-a", ACCUM_FORMAT),
+              make("soar-history-b", ACCUM_FORMAT)],
+      aux: [make("soar-history-aux-a", HISTORY_AUX_FORMAT),
+            make("soar-history-aux-b", HISTORY_AUX_FORMAT)],
+      // The previous frame's camera rows (rows 0-3 of its block).
+      camera: new Float32Array(16),
+    };
+    return this._history;
+  }
+
+  /**
+   * A moving frame's plan when it goes into the reprojected history: the
+   * march takes the full jitter, and the resolve's block is filled from this
+   * frame's camera and the previous one's. The accumulation state is left as
+   * a motion frame of the in-place blend leaves it, so that the frame after
+   * the camera stops restarts the parked average cleanly.
+   */
+  _reprojectionPlan(u, deltaSeconds, outputSize, renderSize) {
+    const [hw, hh] = this.historySize(outputSize, renderSize);
+    const history = this._historyFor(hw, hh);
+    const origin = [u[SLOT.CAM_ORIGIN], u[SLOT.CAM_ORIGIN + 1],
+                    u[SLOT.CAM_ORIGIN + 2]];
+    const forward = [u[SLOT.CAM_FORWARD], u[SLOT.CAM_FORWARD + 1],
+                     u[SLOT.CAM_FORWARD + 2]];
+    const prev = history.camera;
+    let deltaM = [0, 0, 0];
+    if (history.valid) {
+      deltaM = cameraDelta(origin, prev, this.periodic,
+                           this.scene.bmin, this.scene.bmax);
+      // A jump (a map click, a reset) is not a motion to follow.
+      let dot = 0;
+      for (let i = 0; i < 3; i++) dot += forward[i] * prev[4 + i];
+      const angle = Math.acos(Math.min(1, Math.max(-1, dot))) * 180 / Math.PI;
+      if (Math.hypot(...deltaM) > this.motionResetTranslationM
+          || angle > K.DEFAULT_MOTION_RESET_ANGLE_DEGREES) {
+        history.valid = false;
+      }
+    }
+    const dt = deltaSeconds > 0
+      ? deltaSeconds : 1.0 / K.DEFAULT_MOTION_BLEND_REFERENCE_FPS;
+    packResolveUniforms(this._resolveUniforms, u, prev, deltaM, {
+      frameIndex: u[SLOT.FRAME_INDEX],
+      jitterScale: this.reproject.jitterScale,
+      subpixel: true,
+      historyValid: history.valid,
+      lifeFrames: this.reproject.lifetimeS / dt,
+      renderSize, historySize: [hw, hh],
+      params: this.reproject,
+    });
+    this.device.queue.writeBuffer(this.resolveUniformBuf, 0,
+                                  this._resolveUniforms);
+    prev.set(u.subarray(0, 16));
+    history.valid = true;
+
+    this._accumKey = sceneKey(u, this._outputW, this._outputH);
+    this._accumMotion = true;
+    this._accumLastOrigin = origin;
+    this._accumLastForward = forward;
+    this.lastMotionReset = false;
+    return { prevWeight: 0.0, sampleWeight: 1.0, nextCount: 1,
+             subpixel: true, jitterScale: this.reproject.jitterScale,
+             history };
+  }
+
+  /** The resolve pass: this frame's march into the history. Returns the
+   *  history colour texture it wrote, which is what the frame presents. */
+  _encodeResolve(encoder, targets, history) {
+    const read = history.index;
+    const write = 1 - read;
+    const group = this.device.createBindGroup({
+      label: "soar-resolve", layout: this.resolveLayout, entries: [
+        { binding: 0, resource: { buffer: this.resolveUniformBuf } },
+        { binding: 1, resource: targets.sample.createView() },
+        { binding: 2, resource: targets.guide.createView() },
+        { binding: 3, resource: history.color[read].createView() },
+        { binding: 4, resource: history.aux[read].createView() },
+      ],
+    });
+    const p = encoder.beginRenderPass({
+      colorAttachments: [history.color[write], history.aux[write]].map(
+        (tex) => ({ view: tex.createView(), loadOp: "clear", storeOp: "store",
+                    clearValue: { r: 0, g: 0, b: 0, a: 0 } })),
+    });
+    p.setPipeline(this.resolvePipeline);
+    p.setBindGroup(0, group);
+    p.draw(3);
+    p.end();
+    history.index = write;
+    return history.color[write];
   }
 
   // --- the frame ----------------------------------------------------------
@@ -1417,7 +1605,17 @@ export class Renderer {
     // fs_steam_live does).
     const steamClock = u[SLOT.SCENE_CLOCK];
     if (steamLive) u[SLOT.SCENE_CLOCK] = 0.0;
-    const plan = this._accumulationPlan(u, deltaSeconds);
+    // A moving frame goes into the reprojected history, where that is on;
+    // everything else (a parked view, a capture, Max's several samples a
+    // frame, the live steam's picture) is averaged in place as before.
+    const samples = Math.max(1, this.sppPerFrame);
+    const reprojected = this.reproject.on && this._cameraMoving
+      && !this._offline && !steamLive && samples === 1;
+    const plan = reprojected
+      ? this._reprojectionPlan(u, deltaSeconds, outputSize, renderSize)
+      : this._accumulationPlan(u, deltaSeconds);
+    if (!reprojected && this._history) this._history.valid = false;
+    if (this.reproject.on) this._ensureGuideTarget(targets);
     u[SLOT.SCENE_CLOCK] = steamClock;
     u[SLOT.SUBPIXEL_JITTER] = plan.subpixel ? 1.0 : 0.0;
     u[SLOT.JITTER_SCALE] = plan.jitterScale;
@@ -1440,7 +1638,6 @@ export class Renderer {
     // dear exist at all without risking the device. (It also means the
     // uniform buffer can be rewritten between samples, which is what
     // decorrelates their jitter.)
-    const samples = Math.max(1, this.sppPerFrame);
     let outTex = null;
     for (let s = 0; s < samples; s++) {
       const step = s === 0 ? plan : this._extraSamplePlan(plan.jitterScale);
@@ -1470,17 +1667,21 @@ export class Renderer {
       // The surface pass runs per SAMPLE, after this sample's uniform
       // rewrite: its ray is this sample's ray.
       this._encodeMarch(enc, targets, this.rayBindGroup, rayPipeline,
-                        surfacePipelines);
+                        surfacePipelines, this.reproject.on);
 
-      // The accumulator ping-pongs between two textures, so there are exactly
-      // two bind groups for the whole life of a target set. They are built
-      // when the render target is allocated, not every frame.
-      outTex = this._accumIndex === 0 ? targets.accumB : targets.accumA;
-      const p = sPass(outTex.createView());
-      p.setPipeline(this.accumPipeline);
-      p.setBindGroup(0, targets.accumBindGroups[this._accumIndex]);
-      p.draw(3);
-      p.end();
+      if (reprojected) {
+        outTex = this._encodeResolve(enc, targets, plan.history);
+      } else {
+        // The accumulator ping-pongs between two textures, so there are
+        // exactly two bind groups for the whole life of a target set. They
+        // are built when the render target is allocated, not every frame.
+        outTex = this._accumIndex === 0 ? targets.accumB : targets.accumA;
+        const p = sPass(outTex.createView());
+        p.setPipeline(this.accumPipeline);
+        p.setBindGroup(0, targets.accumBindGroups[this._accumIndex]);
+        p.draw(3);
+        p.end();
+      }
 
       // Only the last sample reaches the screen: the ones before it are the
       // picture being built, and presenting each would be a strobe.
@@ -1490,7 +1691,7 @@ export class Renderer {
           : outTex;
         const lensTex = this._encodeLensState(enc, lens, lensPipeline);
         this._encodeBlit(enc, shown, targetView, targetFormat,
-                         renderSize[0] === outputW && renderSize[1] === outputH,
+                         shown.width === outputW && shown.height === outputH,
                          lensTex);
         encodeOverlays(overlays, enc, targetView, targetFormat);
       }
@@ -1643,7 +1844,8 @@ export class Renderer {
    * composites. Every march in the renderer goes through here or through
    * the meter, which mirrors it on its own targets.
    */
-  _encodeMarch(encoder, targets, rayBindGroup, rayPipeline, surfaces) {
+  _encodeMarch(encoder, targets, rayBindGroup, rayPipeline, surfaces,
+               guide = false) {
     let marchGroup = this.surfaceDummyGroup;
     if (surfaces.length > 0) {
       const surface = targets.surface;
@@ -1680,12 +1882,19 @@ export class Renderer {
       }
       marchGroup = surface.group;
     }
-    const p = encoder.beginRenderPass({
-      colorAttachments: [{
-        view: targets.sample.createView(), loadOp: "clear", storeOp: "store",
-        clearValue: { r: 0, g: 0, b: 0, a: 1 },
-      }],
-    });
+    const colorAttachments = [{
+      view: targets.sample.createView(), loadOp: "clear", storeOp: "store",
+      clearValue: { r: 0, g: 0, b: 0, a: 1 },
+    }];
+    // The motion guide beside the sample, for a march compiled to write it
+    // (MOTION_GUIDE).
+    if (guide) {
+      colorAttachments.push({
+        view: targets.guide.createView(), loadOp: "clear", storeOp: "store",
+        clearValue: { r: 0, g: 0, b: 0, a: 0 },
+      });
+    }
+    const p = encoder.beginRenderPass({ colorAttachments });
     p.setPipeline(rayPipeline);
     p.setBindGroup(0, rayBindGroup);
     p.setBindGroup(1, marchGroup);
@@ -1984,7 +2193,7 @@ export class Renderer {
     }
     this._encodeBlit(
       encoder, shown, targetView, targetFormat,
-      this._targets.w === outputSize[0] && this._targets.h === outputSize[1],
+      shown.width === outputSize[0] && shown.height === outputSize[1],
       lensTex);
     encodeOverlays(overlays, encoder, targetView, targetFormat);
     this.device.queue.submit([encoder.finish()]);
@@ -2274,7 +2483,8 @@ export class Renderer {
       this._meterTargets ??= { w: mw, h: mh, sample: this._meterTex };
       await this._ensureSurfaceTarget(this._meterTargets);
       const lighting = { lightCache: false };
-      const spec = this._shaderSpec({ toneMap: false, lighting });
+      const spec = this._shaderSpec({ toneMap: false, lighting,
+                                      motionGuide: false });
       // Its march and its surface pre-pass (the city's), on that
       // specialization, through the same async cache as the frame's: a
       // first meter in a city scene would otherwise compile the whole city

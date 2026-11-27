@@ -8,6 +8,10 @@
 
 "use strict";
 
+/** The shared file the reprojection pass also includes (reproject.js): the
+ *  stratified sequences, to know where each march sample's ray went. */
+const MATH_FILE = "math.wgsl";
+
 /** The files of `surface`'s module, in the order they are joined. */
 export function shaderFiles(manifest, surface) {
   const entry = manifest.surfaces[surface];
@@ -35,8 +39,9 @@ export function assembleShader(manifest, texts, surface) {
 
 /**
  * Fetch the manifest under `baseUrl` and every file it names. Returns each
- * surface's module source and the lens-water source the present pass
- * includes: `{ modules: { ocean: "...", city: "..." }, lens: "..." }`.
+ * surface's module source, the lens-water source the present pass includes
+ * and math.wgsl for the reprojection pass:
+ * `{ modules: { ocean: "...", city: "..." }, lens: "...", math: "..." }`.
  *
  * A deployed manifest carries a `root`: tools/stage_deploy.py stages the
  * files under a folder named by a hash of all of them. The manifest itself
@@ -57,12 +62,16 @@ export async function loadShaders(baseUrl) {
   const surfaces = Object.keys(manifest.surfaces);
   const names = [...new Set(surfaces.flatMap((s) => shaderFiles(manifest, s))),
                  manifest.lens];
+  if (!names.includes(MATH_FILE)) {
+    throw new Error(`the shader manifest does not list ${MATH_FILE}.`);
+  }
   const bodies = await Promise.all(names.map((n) => get(root + n)));
   const texts = Object.fromEntries(names.map((n, i) => [n, bodies[i]]));
   return {
     modules: Object.fromEntries(
       surfaces.map((s) => [s, assembleShader(manifest, texts, s)])),
     lens: texts[manifest.lens],
+    math: texts[MATH_FILE],
   };
 }
 
@@ -77,7 +86,7 @@ export async function loadShaders(baseUrl) {
  */
 export function specializeShader(source,
                                  { periodic, nested, toneMap = true,
-                                   lightCache }) {
+                                   lightCache, motionGuide = false }) {
   if (typeof lightCache !== "boolean") {
     throw new Error(
       "specializeShader needs the lighting method: lightCache as a boolean; " +
@@ -85,7 +94,7 @@ export function specializeShader(source,
   }
   const switches = {
     PERIODIC_DOMAIN: periodic, NESTED: nested, TONE_MAP: toneMap,
-    LIGHT_CACHE: lightCache,
+    LIGHT_CACHE: lightCache, MOTION_GUIDE: motionGuide,
   };
   const header = Object.entries(switches)
     .map(([name, on]) => `const ${name}: bool = ${on ? "true" : "false"};\n`)
@@ -100,5 +109,5 @@ export function specializeShader(source,
  */
 export function shaderVariantKey(spec) {
   return [spec.periodic, spec.nested, spec.toneMap, spec.surface,
-          spec.lightCache].join("|");
+          spec.lightCache, Boolean(spec.motionGuide)].join("|");
 }

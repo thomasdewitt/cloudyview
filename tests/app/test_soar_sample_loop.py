@@ -94,6 +94,8 @@ _JS = textwrap.dedent("""
       r._applyEffectiveQuality();
       r.motionBlendAlpha = K.DEFAULT_MOTION_BLEND_ALPHA;
       r.motionResetTranslationM = 50.0;
+      r.reproject = { on: false };   // the in-place average is what is pinned
+      r._history = null;
       r._accumWeights = new Float32Array(4);
       r.uniformBuf = { label: "uniform" };
       r.accumUniformBuf = { label: "accum" };

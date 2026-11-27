@@ -423,6 +423,34 @@ export const DEFAULT_MOTION_JITTER_SCALE = 0.65;
 export const DEFAULT_MOTION_RESET_ANGLE_DEGREES = 8.0;
 export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
 
+// --- reprojected history (reproject.js) ------------------------------------
+//
+// While the camera moves, the picture is a history image that follows the
+// rays from frame to frame, in place of a blend at fixed screen positions.
+// Per tier: QUALITY_PRESETS[tier].historyScale, the history's size as a
+// fraction of the output's. It is never below the march's own scale.
+export const REPROJECT_DEFAULT = false;
+// The longest a history pixel is believed, in seconds, whatever is in it.
+// Most pixels of a moving view are held to less by their own depth spread
+// (REPROJECT_DRIFT_BUDGET_PX).
+export const REPROJECT_LIFETIME_S = 0.5;
+// How far, in history pixels, one motion per pixel may misplace the
+// contributions it does not fit before the history is let go.
+export const REPROJECT_DRIFT_BUDGET_PX = 1.0;
+// The width (history pixels, one sigma) of the kernel a march sample is
+// spread over where its ray landed.
+export const REPROJECT_SPLAT_SIGMA = 0.5;
+// History is clamped to the mean of this frame's 3x3 march samples around
+// the pixel, plus or minus this many of their standard deviations.
+export const REPROJECT_CLAMP_GAMMA = 1.5;
+// The least weight, in samples, of this frame's soft estimate of a pixel
+// (the fill; reproject.js adds to it where the history is short-lived).
+export const REPROJECT_FILL_WEIGHT = 0.02;
+// With a history to average over, a moving frame takes the whole of the
+// sub-pixel and march-phase jitter (DEFAULT_MOTION_JITTER_SCALE holds it
+// back for the unreprojected blend, which shows each frame's noise).
+export const REPROJECT_JITTER_SCALE = 1.0;
+
 // Rows of four floats in the uniform block; shader/uniforms.wgsl declares
 // what each holds.
 export const UNIFORM_ROWS = 21;
@@ -514,7 +542,7 @@ export const LIGHT_CACHE_BAKE_SLICES_PER_FRAME = 8;
 export const QUALITY_PRESETS = {
   max: {
     name: "max", label: "Max",
-    renderScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
+    renderScale: 1.0, historyScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
     sppPerFrame: 8, lightCache: false,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 32,
     haze: -0.0380,       // 70 km
@@ -524,7 +552,7 @@ export const QUALITY_PRESETS = {
   },
   high: {
     name: "high", label: "High",
-    renderScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
+    renderScale: 1.0, historyScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
     sppPerFrame: 1, lightCache: true,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 32,
     haze: -0.0380,       // 70 km
@@ -534,7 +562,7 @@ export const QUALITY_PRESETS = {
   },
   medium: {
     name: "medium", label: "Medium",
-    renderScale: 0.70, stepFactor: 2.5, lightStepFactor: 4.0,
+    renderScale: 0.70, historyScale: 1.0, stepFactor: 2.5, lightStepFactor: 4.0,
     sppPerFrame: 1, lightCache: true,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 24,
     haze: 0.4027,        // 25.2 km
@@ -544,7 +572,7 @@ export const QUALITY_PRESETS = {
   },
   low: {
     name: "low", label: "Low",
-    renderScale: 0.30, stepFactor: 3.0, lightStepFactor: 8.0,
+    renderScale: 0.30, historyScale: 0.6, stepFactor: 3.0, lightStepFactor: 8.0,
     sppPerFrame: 1, lightCache: true,
     holdRungs: [{ scale: 0.50, sampling: "low" }],
     holdRenderScale: 0.5, parkedFrames: 16,
@@ -560,7 +588,7 @@ export const QUALITY_PRESETS = {
   // in the startup toast, on exactly the machines a jokier name would insult.
   minimal: {
     name: "minimal", label: "Minimal",
-    renderScale: 0.125, stepFactor: 4.0, lightStepFactor: 12.0,
+    renderScale: 0.125, historyScale: 0.25, stepFactor: 4.0, lightStepFactor: 12.0,
     sppPerFrame: 1, lightCache: true,
     holdRungs: [{ scale: 0.25, sampling: "minimal" }],
     holdRenderScale: 0.25, parkedFrames: 8,

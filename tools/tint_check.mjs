@@ -76,8 +76,12 @@ const setup = `(async () => {
   const onOff = [false, true];
   for (const surface of Object.keys(shaders)) {
     for (const nested of onOff) for (const periodic of onOff)
-    for (const toneMap of onOff) for (const lightCache of onOff) {
-      const spec = { periodic, nested, toneMap, lightCache };
+    for (const toneMap of onOff) for (const lightCache of onOff)
+    for (const motionGuide of onOff) {
+      // The guide is only ever compiled into a tone-mapped march (the
+      // meter's linear one leaves it out).
+      if (motionGuide && !toneMap) continue;
+      const spec = { periodic, nested, toneMap, lightCache, motionGuide };
       jobs.push({
         label: surface + " " + Object.entries(spec)
           .filter(([, on]) => on).map(([k]) => k).join("+"),
@@ -90,6 +94,10 @@ const setup = `(async () => {
   // lens.wgsl is not a module on its own: the present shader includes it.
   jobs.push({ label: "present + shader/lens.wgsl",
               code: () => R.presentShader(loaded.lens) });
+  // Nor is math.wgsl: the reprojection pass includes it.
+  const P = await import(base + "reproject.js");
+  jobs.push({ label: "resolve + shader/math.wgsl",
+              code: () => P.resolveShader(loaded.math) });
   const run = async (i) => {
     const { label, code } = jobs[i];
     device.pushErrorScope("validation");

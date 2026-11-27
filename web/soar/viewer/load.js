@@ -113,7 +113,8 @@ export const load = {
 
       renderer = new Renderer(this.device, this.shaders, scene,
                               { canvasFormat: this.canvasFormat,
-                                lensSource: this.lensSource });
+                                lensSource: this.lensSource,
+                                mathSource: this.mathSource });
       if (scene.periodicDefault === false) renderer.setPeriodic(false);
       // Choose the tier BEFORE init(), because init() is what compiles and
       // validates the shader, and the shader is specialized on the tier's

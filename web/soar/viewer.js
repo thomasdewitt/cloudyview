@@ -213,6 +213,7 @@ export class Viewer {
     // By start(): the shader sources, the UI, the canvas context.
     this.shaders = null;
     this.lensSource = null;
+    this.mathSource = null;
     this.hudSource = null;
     this.birdSource = null;
     this.dartSource = null;
@@ -273,6 +274,7 @@ export class Viewer {
     const shaders = await loadShaders(new URL("./shader/", import.meta.url));
     this.shaders = shaders.modules;
     this.lensSource = shaders.lens;
+    this.mathSource = shaders.math;
     this.hudSource = await (await fetch("hud.wgsl")).text();
     this.birdSource = await (await fetch("bird.wgsl")).text();
     this.dartSource = await (await fetch("dart.wgsl")).text();

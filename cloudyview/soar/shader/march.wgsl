@@ -42,8 +42,41 @@ const CITY_UPLIGHT_FLOOR: f32 = 0.02;
 // 1 / 0.25 = 4 optical depths of cloud below.
 const CITY_UPLIGHT_TAU_SCALE: f32 = 0.25;
 
+// What fs_main returns. `color` is the sample of the image. `guide` says
+// where along the ray that sample came from, for a host that carries its
+// picture from one camera to the next (MOTION_GUIDE; all zero without it).
+//
+// A pixel of a cloud has no one depth: its light comes from every step that
+// added to it. What a change of camera position does to the pixel is, to
+// first order in the displacement, each contribution moving across the
+// screen in proportion to its inverse distance. So the guide holds the first
+// two moments of inverse distance over the contributions, each weighted by
+// the opacity it added, w = transmittance before it * (1 - its attenuation):
+//
+//   guide.x   sum of w / t          (km^-1)
+//   guide.y   sum of w / t^2        (km^-2)
+//   guide.z   sum of w              the opacity of everything but the sky
+//
+// The cloud steps, the water and the city are contributions; the sky is at
+// infinity and adds nothing. x / z is then the mean inverse distance of what
+// the pixel shows, which moves its history, and y / z - (x / z)^2 its
+// variance: how far one motion is from fitting all of it, which says how
+// long that history can be kept.
+struct MarchOut {
+    @location(0) color: vec4<f32>,
+    @location(1) guide: vec4<f32>,
+}
+// Distances below this count as this (m): a contribution at the lens would
+// take the moments past what a half float holds.
+const MOTION_GUIDE_MIN_T: f32 = 30.0;
+
+// One contribution's inverse distance (km^-1).
+fn guide_rho(t: f32) -> f32 {
+    return 1000.0 / max(t, MOTION_GUIDE_MIN_T);
+}
+
 @fragment
-fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
+fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> MarchOut {
     let g_hg = CLOUD_G;
     let exposure = u.exposure;
     let jitter_on = u.march_jitter;
@@ -225,6 +258,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     var transmittance = 1.0;
     var col = vec3<f32>(0.0);
+    // The motion guide's two moments (MarchOut).
+    var guide_m1 = 0.0;
+    var guide_m2 = 0.0;
     var tau_depth = 0.0;
     // Whether the surface (the water, or the city) has been composited. It
     // is tracked and not inferred afterwards from t_ocean > t_far: on a miss
@@ -287,6 +323,11 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
             }
             if (CITY && t >= t_city) {
                 col = col + transmittance * city_rgb;
+                if (MOTION_GUIDE) {
+                    let rho = guide_rho(t_city);
+                    guide_m1 = guide_m1 + transmittance * rho;
+                    guide_m2 = guide_m2 + transmittance * rho * rho;
+                }
                 transmittance = 0.0;
                 ocean_consumed = true;
                 break;
@@ -763,6 +804,12 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                 col = col + aer_in * aer;
             }
 
+            if (MOTION_GUIDE) {
+                let w = transmittance * (1.0 - step_atten);
+                let rho = guide_rho(t + 0.5 * dt);
+                guide_m1 = guide_m1 + w * rho;
+                guide_m2 = guide_m2 + w * rho * rho;
+            }
             transmittance = transmittance * step_atten;
             t = t + dt;
         }
@@ -796,6 +843,11 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                                      penumbra_tan),
                         t_ocean, shadow_jitter),
                     ICE_OCEAN_TINT, ice_on);
+        if (MOTION_GUIDE) {
+            let rho = guide_rho(t_ocean);
+            guide_m1 = guide_m1 + transmittance * rho;
+            guide_m2 = guide_m2 + transmittance * rho * rho;
+        }
         transmittance = 0.0;
     }
 
@@ -816,7 +868,19 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         && transmittance > TRANSMITTANCE_CUTOFF
         && t_city < 1e29) {
         col = col + transmittance * city_rgb;
+        if (MOTION_GUIDE) {
+            let rho = guide_rho(t_city);
+            guide_m1 = guide_m1 + transmittance * rho;
+            guide_m2 = guide_m2 + transmittance * rho * rho;
+        }
         transmittance = 0.0;
+    }
+
+    // What is left of the transmittance is the sky's share of the pixel.
+    var out: MarchOut;
+    out.guide = vec4<f32>(0.0);
+    if (MOTION_GUIDE) {
+        out.guide = vec4<f32>(guide_m1, guide_m2, 1.0 - transmittance, 0.0);
     }
 
     // Whatever transmittance is left sees the sky.
@@ -836,8 +900,10 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
     // Alpha is 1, except under the live steam, where it carries t_front.
     if (!TONE_MAP) {
-        return vec4<f32>(col, 1.0);
+        out.color = vec4<f32>(col, 1.0);
+        return out;
     }
-    return vec4<f32>(tone_map(col, exposure, u.gamma),
-                     select(1.0, t_front, steam_live));
+    out.color = vec4<f32>(tone_map(col, exposure, u.gamma),
+                          select(1.0, t_front, steam_live));
+    return out;
 }

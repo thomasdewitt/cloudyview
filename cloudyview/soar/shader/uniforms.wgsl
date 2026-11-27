@@ -10,8 +10,12 @@
 //     const TONE_MAP: bool          false returns linear radiance, not an image
 //     const LIGHT_CACHE: bool       cloud samples read the baked sun optical
 //                                   depth instead of marching to the sun
+//     const MOTION_GUIDE: bool      the march also returns where along the ray
+//                                   its picture came from (march.wgsl
+//                                   MarchOut.guide), for a host that
+//                                   reprojects its history
 //
-// A fifth switch, CITY (the surface under the clouds is the night city, not
+// A sixth switch, CITY (the surface under the clouds is the night city, not
 // the sea), comes with the surface: city/layout.wgsl declares it true and
 // the stand-in city/absent.wgsl declares it false.
 //
