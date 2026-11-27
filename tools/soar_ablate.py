@@ -255,8 +255,9 @@ def main():
             res = sv.time_variants(r, state, view, arms, frames=args.frames,
                                    repeats=args.repeats)
             for a in res.values():
-                a["gpu_ms"] = [None if g is None else g * args.gpu_scale
-                               for g in a["gpu_ms"]]
+                for m in ("gpu_ms", "gpu_all_ms"):
+                    a[m] = [None if g is None else g * args.gpu_scale
+                            for g in a[m]]
                 for g, w in zip(a["gpu_ms"], a["wall_ms"]):
                     if g is not None and g > 1.05 * w:
                         ts_ok = False

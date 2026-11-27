@@ -72,11 +72,17 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import soar_variants as sv                                    # noqa: E402
 from soar_ablate import ablate, city_views, CONTROL           # noqa: E402
+from soar_gradient_stencils import (GRADIENT_CANDIDATES,       # noqa: E402
+                                    ALL_GRADIENT_VARIANTS, gradient_candidate)
 
 DAY_CANDIDATES = ("grad_coarse", "grad_fine", "pm_step8", "pm_cap30",
                   "pm_vertical")
 CITY_CANDIDATES = ("uplight_4",)
 CEILINGS = ("no_premarch", "no_gradient")
+# --set gradient: soar_gradient_stencils' variants, beside grad_coarse (one
+# stencil dropped) and no_gradient (the whole stencil dropped) for scale.
+GRADIENT_SET = GRADIENT_CANDIDATES + ("grad_coarse", "no_gradient")
+CROP = (960, 540)            # PNG panels larger than this are cropped to it
 PM_NOVELTY_MIN = 0.05        # sin of 2.87 deg from the vertical
 NOISE_FRAME_OFFSET = 4096
 DIFF_GAIN = 8.0
@@ -165,7 +171,23 @@ def candidate(src: str, name: str) -> str:
     if name == "uplight_4":
         return p(src, "const CITY_UP_PROBE_STEPS: i32 = 12;",
                  "const CITY_UP_PROBE_STEPS: i32 = 4;  // menu", what=name)
+    if name in ALL_GRADIENT_VARIANTS:
+        return gradient_candidate(src, name)
     return ablate(src, name)
+
+
+def crop_window(diff: np.ndarray, size=CROP):
+    """(y0, x0) of the size[0] x size[1] window holding the most |diff|,
+    or (0, 0) for an image no larger than the window."""
+    h, w = diff.shape[:2]
+    cw, ch = min(size[0], w), min(size[1], h)
+    if (cw, ch) == (w, h):
+        return 0, 0
+    m = np.abs(diff).sum(axis=-1)
+    ii = np.pad(m.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+    win = ii[ch:, cw:] - ii[:-ch, cw:] - ii[ch:, :-cw] + ii[:-ch, :-cw]
+    y0, x0 = np.unravel_index(np.argmax(win), win.shape)
+    return int(y0), int(x0)
 
 
 def vertical_share(view_kw: dict, size, threshold=PM_NOVELTY_MIN) -> float:
@@ -222,9 +244,12 @@ def main():
                     help="where the baked demos are (default web/soar/demos)")
     ap.add_argument("--scene", default="day", choices=("day", "city"))
     ap.add_argument("--tiers", default="minimal,low,medium,high")
+    ap.add_argument("--set", default="menu", choices=("menu", "gradient"),
+                    help="the default variants: the first menu (pre-march, "
+                         "gradient and uplight cuts) or the gradient stencils")
     ap.add_argument("--variants", default="",
-                    help="comma-separated; default every candidate and ceiling "
-                         "for the scene. stock and stock_again always run.")
+                    help="comma-separated; default the --set's candidates and "
+                         "ceilings for the scene. stock and stock_again always run.")
     ap.add_argument("--views", default="", help="comma-separated; default all")
     ap.add_argument("--output", default="2560x1440",
                     help="the window; each tier renders at its scale of it")
@@ -233,8 +258,11 @@ def main():
                     help="timings per arm and view; the fastest is reported")
     ap.add_argument("--image-frames", type=int, default=32,
                     help="frames accumulated for each picture")
-    ap.add_argument("--png-tiers", default="minimal,low",
-                    help="tiers whose pictures are candidates for the PNGs")
+    ap.add_argument("--png-tiers", default=None,
+                    help="tiers whose pictures are candidates for the PNGs "
+                         "(default minimal,low; low,medium,high for --set "
+                         "gradient). Panels larger than CROP are cropped, at "
+                         "full resolution, to the window that differs most.")
     ap.add_argument("--png-dir", default=None,
                     help="where the PNGs go (default: beside --out, menu_png/)")
     ap.add_argument("--out", default=None, help="JSON lines, appended")
@@ -250,7 +278,12 @@ def main():
 
     city = args.scene == "city"
     surface = "city" if city else "ocean"
-    default = (CITY_CANDIDATES if city else DAY_CANDIDATES) + CEILINGS
+    if args.set == "gradient":
+        default = GRADIENT_SET
+    else:
+        default = (CITY_CANDIDATES if city else DAY_CANDIDATES) + CEILINGS
+    if args.png_tiers is None:
+        args.png_tiers = "low,medium,high" if args.set == "gradient" else "minimal,low"
     names = [v for v in (args.variants.split(",") if args.variants else default) if v]
     presets = sv.flight_presets()
     out_w, out_h = (int(v) for v in args.output.lower().split("x"))
@@ -320,6 +353,17 @@ def main():
             ref = pics["stock"]
             diffs = {a.label: picture_diff(pics[a.label], ref) for a in arms[1:]}
             diffs["noise"] = picture_diff(noise_img, ref)
+            # One frame alone (frame 0, unjittered): what a moving camera
+            # shows before any accumulation, which is where an alternating
+            # stencil's error is not averaged away.
+            single = {}
+            for a in arms:
+                sv._select(r, a)
+                single[a.label] = r.render(state, view, frames=1)
+            sv._select(r, arms[0])
+            diffs_1 = {a.label: picture_diff(single[a.label], single["stock"])
+                       for a in arms[1:]}
+            del single
             rec = dict(kind="menu", label=args.label, rev=rev, shader_dirty=bool(dirty),
                        device=info.get("device"), backend=info.get("backend_type"),
                        demo=level.name, scene=args.scene, tier=tier, view=name,
@@ -328,6 +372,7 @@ def main():
                        image_frames=args.image_frames,
                        when=time.strftime("%Y-%m-%d %H:%M:%S"),
                        samples=res, summary=summ, picture=diffs,
+                       picture_one_frame=diffs_1, variant_set=args.set,
                        pm_vertical_share=(vertical_share(vk, size)
                                           if "pm_vertical" in names else None),
                        rays_within_deg_of_vertical={
@@ -345,11 +390,15 @@ def main():
             print(f"  {name:20s}{base:10.3f}{cells}  noise {diffs['noise']['rms']:.2f}"
                   f"  spread<= {100 * sp:.0f}%", flush=True)
             if tier in png_tiers:
-                s8 = to_u8(ref)
                 for a in arms[2:]:
                     lst = best.setdefault(a.label, [])
-                    lst.append((diffs[a.label]["rms"], tier, name, s8,
-                                to_u8(pics[a.label])))
+                    if len(lst) == 2 and diffs[a.label]["rms"] <= lst[-1][0]:
+                        continue
+                    y0, x0 = crop_window(pics[a.label] - ref)
+                    ch, cw = min(CROP[1], ref.shape[0]), min(CROP[0], ref.shape[1])
+                    win = (slice(y0, y0 + ch), slice(x0, x0 + cw))
+                    lst.append((diffs[a.label]["rms"], tier, name, to_u8(ref[win]),
+                                to_u8(pics[a.label][win])))
                     lst.sort(key=lambda e: -e[0])
                     del lst[2:]
             del pics, noise_img
@@ -386,13 +435,14 @@ def report(paths, md_path=None):
              "from stock in 8-bit display levels; RMS is the root of the mean "
              "over views of each view's mean square, p99.9 and max the "
              "largest over views. noise = stock against stock over other "
-             "frame indices (the converged render's own grain)."]
+             "frame indices (the converged render's own grain). 1-frame RMS: "
+             "the same RMS for a single unjittered frame, where present."]
     for scene in sorted({k[0] for k in groups}):
         arms = scene_arms[scene]
         lines += ["", f"## {scene}", "",
                   "| tier | views | stock ms | arm | time | RMS | p99.9 | max |"
-                  " pm_vertical skips |",
-                  "|---|---|---|---|---|---|---|---|---|"]
+                  " 1-frame RMS | pm_vertical skips |",
+                  "|---|---|---|---|---|---|---|---|---|---|"]
         for tier in sorted({k[1] for k in groups if k[0] == scene}, key=order.get):
             rs = groups[(scene, tier)]
             base = sum(r["summary"]["stock"]["gpu_ms"]["min"] for r in rs)
@@ -415,9 +465,13 @@ def report(paths, md_path=None):
                         skip += "; within 10/20/30 deg: " + " / ".join(
                             f"{100 * sum(n[k] for n in near) / len(near):.1f}%"
                             for k in ("10", "20", "30"))
+                one = [r["picture_one_frame"][a] for r in rs
+                       if a in r.get("picture_one_frame", {})]
+                rms1 = (f"{math.sqrt(sum(d['rms'] ** 2 for d in one) / len(one)):.2f}"
+                        if one else "–")
                 lines.append(f"| {tier} | {len(rs)} | {base:.2f} | {a} | {t} | "
                              f"{rms:.2f} | {max(d['p999'] for d in pd):.1f} | "
-                             f"{max(d['max'] for d in pd):.0f} | {skip} |")
+                             f"{max(d['max'] for d in pd):.0f} | {rms1} | {skip} |")
         lines.append("")
     md = "\n".join(lines) + "\n"
     if md_path:
