@@ -1624,11 +1624,21 @@ export class Renderer {
     // rung switching methods or an override is a scene change: never
     // averaged with the old method, and with a parked camera a clean
     // restart (see methodKey below).
+    // The live view's frames go into the reprojected history, where that is
+    // on, moving or parked; everything else (a capture, Max's several
+    // samples a frame, the live steam's picture) is averaged in place.
+    const samples = Math.max(1, this.sppPerFrame);
+    const reprojected = this.reproject.on
+      && !this._offline && !steamLive && samples === 1;
+    // The surfaces then filter over the history's pixel, not the march's.
+    const filterFootprint = reprojected
+      ? renderSize[0] / this.historySize(outputSize, renderSize)[0] : 1.0;
     const u = packUniforms(state, {
       ...view, outputSize, renderSize,
       ...lighting,
       iceMode: this.iceModeActive,
       liveSteam: steamLive,
+      filterFootprint,
     });
     // A change of lighting method under a parked camera restarts the
     // average instead of blending into it. Any scene-key change with a
@@ -1650,12 +1660,6 @@ export class Renderer {
     // fs_steam_live does).
     const steamClock = u[SLOT.SCENE_CLOCK];
     if (steamLive) u[SLOT.SCENE_CLOCK] = 0.0;
-    // The live view's frames go into the reprojected history, where that is
-    // on, moving or parked; everything else (a capture, Max's several
-    // samples a frame, the live steam's picture) is averaged in place.
-    const samples = Math.max(1, this.sppPerFrame);
-    const reprojected = this.reproject.on
-      && !this._offline && !steamLive && samples === 1;
     const plan = reprojected
       ? this._reprojectionPlan(u, deltaSeconds, outputSize, renderSize)
       : this._accumulationPlan(u, deltaSeconds);

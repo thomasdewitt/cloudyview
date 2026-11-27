@@ -462,8 +462,10 @@ def pack_uniforms(state: SceneState, view: ViewState) -> np.ndarray:
         roof_density = view.city_roof_density
     u[19] = (math.tan(view.light_march_lod_degrees * DEG), view_step_tan,
              roof_density, 0.0)
+    # z: the surfaces' filter footprint in march pixels, which is one for
+    # this host: it accumulates on the grid it marches.
     u[20] = (1.0 if state.periodic else 0.0,
-             1.0 if view.light_cache else 0.0, 0.0, 0.0)
+             1.0 if view.light_cache else 0.0, 1.0, 0.0)
     return u
 
 

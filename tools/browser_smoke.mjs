@@ -1,6 +1,10 @@
 // Drive soar the way a user does, in a real Chrome, and assert on app state.
 //
 //   node tools/browser_smoke.mjs [--web web] [--cdp 9333] [--scenes day,city]
+//        [--query "k=v&k=v"]
+//
+// --query adds parameters to every soar page (a flag the viewer reads at
+// load, such as reproject=1).
 //
 // For a day demo (?demo=twpice, research mode) and the cyberpunk city, this
 // loads the scene and then: flies with key events, picks a tier in the
@@ -56,6 +60,7 @@ const option = (name, fallback) => {
 const webDir = option("--web", join(repo, "web"));
 const cdpPort = option("--cdp", "9333");
 const scenes = option("--scenes", "day,city").split(",");
+const query = option("--query", "");
 
 const SCENES = {
   day: { mode: "research", demo: "twpice" },
@@ -180,9 +185,9 @@ async function loadScene(name, server) {
     localStorage.setItem("soar.tutorialDone", "1");
     localStorage.setItem("soar.tutorialResearchDone", "1"); true`);
   if (sc.demo) {
-    await tab.goto(`${server.base}/soar/?demo=${sc.demo}`);
+    await tab.goto(`${server.base}/soar/?demo=${sc.demo}${query ? `&${query}` : ""}`);
   } else {
-    await tab.goto(`${server.base}/soar/`);
+    await tab.goto(`${server.base}/soar/${query ? `?${query}` : ""}`);
     await tab.waitFor(`!document.getElementById("capability").innerText.startsWith("Checking")`);
     await tab.eval(`document.getElementById("fly-less").click(); true`);
   }

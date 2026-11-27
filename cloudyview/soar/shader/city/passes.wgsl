@@ -38,7 +38,7 @@ fn surface_pass_city(dir: vec3<f32>, pixel_angle: f32) -> vec4<f32> {
         return vec4<f32>(bitcast<f32>(mark), 0.0, 0.0, 1e30);
     }
     let rgb = city_fog(city_shade(chit, dir, pixel_angle * chit.t,
-                                  true_pixel_angle() * chit.t, true),
+                                  filter_pixel_angle() * chit.t, true),
                        city_o, dir, chit.t, chit.pos);
     // Flagged only where a reflection can be traced: past CITY_REFL_LOD the
     // wet street's reflection is its environment mean, measured at under
@@ -647,7 +647,7 @@ fn city_wet_reflection(city_o: vec3<f32>, dir: vec3<f32>, t: f32,
             o.fp = pixel_angle * (t + hr.t) + 0.5 * lobe.alpha * hr.t;
             // The texture under the lobe, filtered over its footprint on the
             // true pixel's terms.
-            o.fp_filter = true_pixel_angle() * (t + hr.t)
+            o.fp_filter = filter_pixel_angle() * (t + hr.t)
                           + 0.5 * lobe.alpha * hr.t;
         }
     }

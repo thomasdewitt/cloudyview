@@ -42,6 +42,10 @@ import * as K from "./constants.js";
 export const GUIDE_FORMAT = "rgba16float";
 export const HISTORY_AUX_FORMAT = "rg16float";
 
+/** The unit of distance (m) the march's guide is written in: march.wgsl's
+ *  GUIDE_UNIT_M, which a test holds this to. */
+export const GUIDE_UNIT_M = 100.0;
+
 /** Floats in the resolve pass's uniform block (ResolveUniforms). */
 export const RESOLVE_UNIFORM_FLOATS = 44;
 
@@ -63,9 +67,9 @@ struct ResolveUniforms {
     frame_index: f32,
     cam_up: vec3<f32>,
     jitter_scale: f32,
-    // This camera's position minus the previous frame's (km), and the
-    // previous camera.
-    delta_km: vec3<f32>,
+    // This camera's position minus the previous frame's, in the guide's
+    // unit of distance (GUIDE_UNIT_M), and the previous camera.
+    delta_g: vec3<f32>,
     prev_tan_half_fov: f32,
     prev_forward: vec3<f32>,
     history_valid: f32,
@@ -94,8 +98,8 @@ struct ResolveUniforms {
 
 struct ResolveOut {
     @location(0) color: vec4<f32>,
-    // x: the mean inverse distance used (km^-1). y: the history's weight,
-    // in samples.
+    // x: the mean inverse distance used (guide units). y: the history's
+    // weight, in samples.
     @location(1) aux: vec4<f32>,
 }
 
@@ -193,7 +197,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> ResolveOut {
     let w_new = min(w_splat, 1.0);
 
     // What the pixel shows, as the guide summarizes it: the mean inverse
-    // distance (km^-1) and its variance over the contributions.
+    // distance (in the guide's unit) and its variance over the contributions.
     let opacity = max(g_fill.z, GUIDE_MIN_OPACITY);
     let rho = g_fill.x / opacity;
     let rho_var = max(g_fill.y / opacity - rho * rho, 0.0);
@@ -207,7 +211,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> ResolveOut {
         (1.0 - 2.0 * uv.y) * ru.tan_half_fov / ru.aspect);
     let dir = normalize(ru.cam_forward + ndc.x * ru.cam_right
                         + ndc.y * ru.cam_up);
-    let v = dir + rho * ru.delta_km;
+    let v = dir + rho * ru.delta_g;
     let zf = dot(v, ru.prev_forward);
     let pn = vec2<f32>(dot(v, ru.prev_right), dot(v, ru.prev_up))
              / max(zf, 1e-6);
@@ -260,7 +264,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> ResolveOut {
     // contributions whose inverse distances spread by sqrt(rho_var); each
     // frame of sideways travel therefore misplaces them by that spread times
     // the travel, and the errors add up over the history's life.
-    let side = ru.delta_km - dot(ru.delta_km, dir) * dir;
+    let side = ru.delta_g - dot(ru.delta_g, dir) * dir;
     let drift_px = length(side) * sqrt(rho_var) * ru.px_per_rad;
     let life = min(ru.life_frames, ru.drift_budget / max(drift_px, 1e-6));
     let decay = clamp(1.0 - 1.0 / max(life, 1.0), 0.0, 1.0);
@@ -350,9 +354,9 @@ export function packResolveUniforms(out, u, prev, deltaM, {
   // block; here they are the frame index and the jitter scale.
   out[11] = frameIndex;
   out[15] = jitterScale;
-  out[16] = deltaM[0] / 1000.0;
-  out[17] = deltaM[1] / 1000.0;
-  out[18] = deltaM[2] / 1000.0;
+  out[16] = deltaM[0] / GUIDE_UNIT_M;
+  out[17] = deltaM[1] / GUIDE_UNIT_M;
+  out[18] = deltaM[2] / GUIDE_UNIT_M;
   out[19] = prev[3];                      // previous tan(fov / 2)
   out.set(prev.subarray(4, 7), 20);       // previous forward
   out[23] = historyValid ? 1.0 : 0.0;

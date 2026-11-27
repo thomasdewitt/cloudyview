@@ -231,7 +231,7 @@ fn city_shell_shade(h: CityHit, cc: CityCell, dir: vec3<f32>, fp: f32,
     var flat = vec3<f32>(0.0);
     if (blend > 0.0) {
         flat = city_facade_flat(cc, f, hw, dir, pa * t_wall,
-                                true_pixel_angle() * t_wall, true, fill);
+                                filter_pixel_angle() * t_wall, true, fill);
         if (blend >= 1.0) {
             return flat;
         }

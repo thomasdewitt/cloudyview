@@ -53,8 +53,8 @@ const CITY_UPLIGHT_TAU_SCALE: f32 = 0.25;
 // two moments of inverse distance over the contributions, each weighted by
 // the opacity it added, w = transmittance before it * (1 - its attenuation):
 //
-//   guide.x   sum of w / t          (km^-1)
-//   guide.y   sum of w / t^2        (km^-2)
+//   guide.x   sum of w / t          t in units of GUIDE_UNIT_M
+//   guide.y   sum of w / t^2
 //   guide.z   sum of w              the opacity of everything but the sky
 //
 // The cloud steps, the water and the city are contributions; the sky is at
@@ -66,13 +66,18 @@ struct MarchOut {
     @location(0) color: vec4<f32>,
     @location(1) guide: vec4<f32>,
 }
-// Distances below this count as this (m): a contribution at the lens would
-// take the moments past what a half float holds.
-const MOTION_GUIDE_MIN_T: f32 = 30.0;
+// The guide's unit of distance (m), and the distance below which a
+// contribution counts as being at it (m). They are chosen for the half
+// floats the guide is stored in: from a wall 2 m away to a cloud 100 km
+// away the inverse distance runs from 50 to 0.001 and its square from 2500
+// to 1e-6, all of which a half float holds. The host's resolve pass uses
+// the same unit (reproject.js GUIDE_UNIT_M).
+const GUIDE_UNIT_M: f32 = 100.0;
+const GUIDE_MIN_T: f32 = 2.0;
 
-// One contribution's inverse distance (km^-1).
+// One contribution's inverse distance, in 1 / GUIDE_UNIT_M.
 fn guide_rho(t: f32) -> f32 {
-    return 1000.0 / max(t, MOTION_GUIDE_MIN_T);
+    return GUIDE_UNIT_M / max(t, GUIDE_MIN_T);
 }
 
 @fragment

@@ -5,8 +5,9 @@
     uv run python tools/soar_bench.py --scenes day --tiers low,medium --repeats 5
     uv run python tools/soar_bench.py --demo web/soar/demos/twpice
 
-Each tier is rendered as it flies: its own step factors, render scale and
-lighting method, read from web/soar/constants.js, at the output size given.
+Each tier is rendered as it flies: its own step factors, render scale,
+lighting method, haze and level-of-detail angles, read from
+web/soar/constants.js, at the output size given.
 The renderer is the Python host, so a number here is the cost of the shader
 on this machine's GPU without the browser around it.
 
@@ -46,7 +47,9 @@ from cloudyview.soar.renderer import SoarRenderer             # noqa: E402
 from cloudyview.soar.surfaces import (surface_cell_m,         # noqa: E402
                                       surface_clock_period_s,
                                       surface_period_m)
-from cloudyview.soar.uniforms import (DEFAULT_OCEAN_REFLECTANCE,  # noqa: E402
+from cloudyview.soar.uniforms import (APP_LIGHT_MARCH_LOD_DEGREES,  # noqa: E402
+                                      APP_VIEW_STEP_LOD_DEGREES,
+                                      DEFAULT_OCEAN_REFLECTANCE,
                                       SceneState, ViewState,
                                       camera_world_origin)
 from cloudyview.witness import NestedLevel                    # noqa: E402
@@ -167,10 +170,21 @@ def main():
             state = scene_state(tier)
             size = (max(1, round(out_w * p["renderScale"])),
                     max(1, round(out_h * p["renderScale"])))
+            # The tier's look, as the browser flies it (viewer/loop.js
+            # _viewKwargs): its haze and its LOD angles change how far a ray
+            # marches and at what step, so a tier timed without them is not
+            # that tier.
+            lod = p["cityLodStrength"] if scene == "city" else p["lodStrength"]
+            look = dict(
+                haze=p["haze"],
+                light_march_lod_degrees=APP_LIGHT_MARCH_LOD_DEGREES * lod,
+                view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * lod)
+            if scene == "city":
+                look["city_roof_density"] = p["cityRoofDensity"]
             for name in wanted:
                 view = ViewState(output_size=(out_w, out_h), render_size=size,
                                  jitter=True, light_cache=bool(p["lightCache"]),
-                                 **views[name])
+                                 **look, **views[name])
                 # Untimed: compiles the pipelines and, for the scene's first
                 # view, bakes the light cache.
                 renderer.render(state, view, frames=2)

@@ -170,11 +170,15 @@ struct Uniforms {
     // periodic, and 1.0 when cloud samples read tau_sun from the light_tau
     // texture. They are the host's copies of the PERIODIC_DOMAIN and
     // LIGHT_CACHE switches, packed so that changing one changes the scene
-    // key. Then a slot nothing uses, and bake_slice, the field-x plane of
-    // the cache being rendered, read by fs_bake_light only.
+    // key. Then filter_footprint, the width of the footprint a surface
+    // filters its texture over, in march pixels (filter_pixel_angle): 1.0,
+    // or the size of a history pixel in march pixels where a host
+    // reconstructs the picture on a finer grid than it marches. Then
+    // bake_slice, the field-x plane of the cache being rendered, read by
+    // fs_bake_light only.
     periodic_flag: f32,
     light_cache_flag: f32,
-    unused_20_2: f32,
+    filter_footprint: f32,
     bake_slice: f32,
 };
 

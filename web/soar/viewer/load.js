@@ -115,6 +115,11 @@ export const load = {
                               { canvasFormat: this.canvasFormat,
                                 lensSource: this.lensSource,
                                 mathSource: this.mathSource });
+      // ?reproject=0|1 overrides REPROJECT_DEFAULT, for comparing the two
+      // ways of building a moving picture. Before init(), which compiles
+      // the march the answer selects.
+      const reproject = new URLSearchParams(location.search).get("reproject");
+      if (reproject !== null) renderer.reproject.on = reproject !== "0";
       if (scene.periodicDefault === false) renderer.setPeriodic(false);
       // Choose the tier BEFORE init(), because init() is what compiles and
       // validates the shader, and the shader is specialized on the tier's

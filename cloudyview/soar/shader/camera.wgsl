@@ -17,11 +17,21 @@ struct CameraRay {
     true_pixel_angle: f32,  // one pixel's angle, without the LOD floor (rad)
 }
 
-// One pixel's angular size (rad, small-angle): 2 tan(fov / 2) / width. A
-// surface filters its texture over this footprint whatever the LOD angle is:
-// a wider one would only blur it.
+// One march pixel's angular size (rad, small-angle): 2 tan(fov / 2) / width.
 fn true_pixel_angle() -> f32 {
     return 2.0 * u.tan_half_fov / u.image_width;
+}
+
+// The angle a surface filters its texture over (rad), whatever the LOD
+// angle is (a wider one would only blur it): one pixel of the picture's
+// grid. That is the march pixel, except where the host builds the
+// picture on a finer grid from jittered marches (u.filter_footprint < 1);
+// a sample filtered over the whole march pixel would put back the blur that
+// grid is there to remove. Only the filter narrows: what is traced, and to
+// what detail, stays on the march pixel's terms (lod_pixel_angle), so a
+// finer grid does not make a frame's rays cost more.
+fn filter_pixel_angle() -> f32 {
+    return true_pixel_angle() * u.filter_footprint;
 }
 
 // The angle a surface's level of detail resolves at: the true pixel's, or

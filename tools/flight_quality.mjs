@@ -2,7 +2,7 @@
 // own renderer, scored against what the same tier converges to at the same
 // camera pose.
 //
-//   node tools/flight_quality.mjs --web web [--cdp 9333] [--demo twpice]
+//   node tools/flight_quality.mjs --web web [--cdp 9333] [--demo twpice|cyberpunk]
 //        [--tiers low,minimal] [--paths cruise,strafe,pan] [--size 1280x720]
 //        [--frames 90] [--every 15] [--fps 60] [--query "k=v&k=v"]
 //        [--set "renderer.prop=value;..."] [--save DIR] [--json]
@@ -82,11 +82,19 @@ try {
   await tab.goto(`${server.base}/`);
   const adapter = await requireHardwareAdapter(tab);
   await tab.goto(`${server.base}/soar/`);
+  // --demo cyberpunk is the night city, entered as pinned_still enters it.
+  const city = demo === "cyberpunk";
   await tab.eval(`localStorage.clear();
-    localStorage.setItem("soar.mode", "research");
+    localStorage.setItem("soar.mode", ${JSON.stringify(city ? "cyberpunk" : "research")});
     localStorage.setItem("soar.tutorialDone", "1");
     localStorage.setItem("soar.tutorialResearchDone", "1"); true`);
-  await tab.goto(`${server.base}/soar/?demo=${demo}${query ? `&${query}` : ""}`);
+  if (city) {
+    await tab.goto(`${server.base}/soar/${query ? `?${query}` : ""}`);
+    await tab.waitFor(`!document.getElementById("capability").innerText.startsWith("Checking")`);
+    await tab.eval(`document.getElementById("fly-less").click(); true`);
+  } else {
+    await tab.goto(`${server.base}/soar/?demo=${demo}${query ? `&${query}` : ""}`);
+  }
   await tab.waitFor(`(() => { const L = document.getElementById("loading");
     if (L.classList.contains("failed") && !L.hidden) throw new Error(L.innerText);
     return window.soar?.scene && L.hidden; })()`, 180000);
@@ -135,12 +143,16 @@ try {
           const pose = (k) => {
             const t = Math.min(k, stopAt) * dt;
             const a = path.forward * speed * t, b = path.right * speed * t;
-            cam.position = [start.pos[0] + a * fwd[0] + b * right[0],
-                            start.pos[1] + a * fwd[1] + b * right[1],
-                            start.pos[2] + a * fwd[2] + b * right[2]];
+            // From the start by one displacement, through the camera's own
+            // move path: it keeps a second position, in the surface tile's
+            // frame, and a position assigned directly would leave the city
+            // standing still under moving clouds.
+            cam.position = [...start.pos];
+            cam._resyncSurface();
+            cam.displace(a * fwd[0] + b * right[0], a * fwd[1] + b * right[1],
+                         a * fwd[2] + b * right[2]);
             cam.azimuth = (start.az + path.yaw * t) % 360;
             cam.elevation = start.el;
-            cam.constrain();
           };
           const viewAt = (k) => ({ ...s._viewKwargs(), frameIndex: k,
                                    sceneTime: k * dt });

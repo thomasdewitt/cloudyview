@@ -260,7 +260,7 @@ fn ocean_shade(hit: vec3<f32>, dir: vec3<f32>, sun: vec3<f32>,
     // One pixel's angular span projected onto the water. The grazing factor
     // stretches it along the view and takes the horizon to coarser mips.
     let grazing = max(abs(dir.z), 0.03);
-    let pixel_angular_span = true_pixel_angle();
+    let pixel_angular_span = filter_pixel_angle();
     let across = t_hit * pixel_angular_span;
     let along = across / grazing;
     let texel_span = max(along / u.tile_cell, 1.0);

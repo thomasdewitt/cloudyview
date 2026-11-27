@@ -148,6 +148,10 @@ export function packUniforms(state, view) {
     // view's, and its auto-exposure meter's. Every still, video and replay
     // leaves it off and marches the steam.
     liveSteam = false,
+    // The surfaces' filter footprint in march pixels (u.filter_footprint):
+    // 1, or the size of a history pixel in march pixels for a frame that
+    // goes into a reprojected history finer than its march.
+    filterFootprint = 1.0,
     // The city's roof clutter density: the tier's cityRoofDensity
     // at the flight's tier, 1 as tuned. Packed under CITY only.
     cityRoofDensity = 1.0,
@@ -314,9 +318,14 @@ export function packUniforms(state, view) {
   row(19, Math.tan(lightMarchLodDegrees * DEG), viewStepTan, roofDensity,
       city && liveSteam ? 1.0 : 0.0);
   // The host's copies of two compile-time switches, so that changing one
-  // changes the scene key. z is unused; w is the bake slice index, which the
+  // changes the scene key. z is the surfaces' filter footprint in march
+  // pixels (filterFootprint); w is the bake slice index, which the
   // renderer's bake pass writes into its own copy of the block.
-  row(20, periodic ? 1.0 : 0.0, lightCache ? 1.0 : 0.0, 0.0, 0.0);
+  if (!(filterFootprint > 0.0 && filterFootprint <= 1.0)) {
+    throw new RangeError(
+      `filterFootprint must be in (0, 1]; got ${filterFootprint}.`);
+  }
+  row(20, periodic ? 1.0 : 0.0, lightCache ? 1.0 : 0.0, filterFootprint, 0.0);
   return u;
 }
 
