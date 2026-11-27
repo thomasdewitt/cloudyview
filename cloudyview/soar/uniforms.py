@@ -301,6 +301,9 @@ class ViewState:
     # Run the forward pre-march (the AHEAD_MARCH switch). The cheaper tiers
     # leave it out (tiers.QUALITY_PRESETS).
     ahead_march: bool = True
+    # Blend the one-voxel stencil into the shading normal (the FINE_GRADIENT
+    # switch). The cheapest tier leaves it out.
+    fine_gradient: bool = True
     # The scene clock (s): where the city's steam is in its motion.
     # The browser advances it while flying; a still states it (witness
     # --time) and a track carries it per sample.

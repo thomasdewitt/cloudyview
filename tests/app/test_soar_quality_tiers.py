@@ -131,9 +131,14 @@ def test_the_two_hosts_agree_on_each_tiers_lighting_method(js):
             is QUALITY_PRESETS[tier]["light_cache"], tier
         assert js["presets"][tier]["aheadMarch"] \
             is QUALITY_PRESETS[tier]["ahead_march"], tier
-    # The cheaper tiers are the ones that leave the pre-march out.
+        assert js["presets"][tier]["fineGradient"] \
+            is QUALITY_PRESETS[tier]["fine_gradient"], tier
+    # The cheaper tiers are the ones that leave the pre-march out, and the
+    # cheapest the fine gradient stencil.
     assert [js["presets"][t]["aheadMarch"] for t in TIERS] \
         == [False, False, True, True]
+    assert [js["presets"][t]["fineGradient"] for t in TIERS] \
+        == [False, True, True, True]
 
 
 def test_every_tier_appears_in_every_per_tier_table(js):

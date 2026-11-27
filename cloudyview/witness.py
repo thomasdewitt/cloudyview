@@ -404,6 +404,7 @@ def render_nested(
         view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * lod,
         light_cache=bool(tier and tier["light_cache"]),
         ahead_march=bool(tier["ahead_march"]) if tier else True,
+        fine_gradient=bool(tier["fine_gradient"]) if tier else True,
         scene_time=float(scene_time),
         # The roofs' clutter follows the tier, as in the browser; a render
         # with no tier gets the density it asked for, or the density the

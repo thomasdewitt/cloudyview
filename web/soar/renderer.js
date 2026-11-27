@@ -207,6 +207,18 @@ fn fs_exact(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
                         frag_pos.xy / dims);
     return vec4<f32>(dither_present(rgb, floor(frag_pos.xy)), 1.0);
 }
+
+// A held view on its way from the picture it stopped on to its own average:
+// src_tex is the average, bridge_tex what it is carried over from, each read
+// bilinearly at its own size, and bridge.x the average's share.
+@group(0) @binding(2) var bridge_tex: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> bridge: vec4<f32>;
+@fragment
+fn fs_bridge(in: VOut) -> @location(0) vec4<f32> {
+    let carried = lens_bilinear(bridge_tex, in.uv);
+    let rgb = lens_here(mix(carried, sample_bilinear(in.uv), bridge.x), in.uv);
+    return vec4<f32>(dither_present(rgb, floor(in.position.xy)), 1.0);
+}
 `;
 
 /** The light cache's texture format: red is the optical depth to the sun,
@@ -214,6 +226,9 @@ fn fs_exact(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 const LIGHT_CACHE_FORMAT = "rg16float";
 /** The lighting method the bake is compiled with; see _bakePipeline. */
 const BAKE_LIGHTING = Object.freeze({ lightCache: false });
+
+/** A history lifetime, a clamp width or a weight cap that never binds. */
+const RESOLVE_NEVER = 1e9;
 
 /** Whether a _pipeline answer is still a compile in flight. */
 function isPending(pipelineOrPromise) {
@@ -493,6 +508,22 @@ export class Renderer {
     this.blitPipelineLayout = device.createPipelineLayout({
       bindGroupLayouts: [this.blitLayout],
     });
+    // The bridge present (fs_bridge): the two above, the picture carried
+    // over from, and the average's share.
+    const presentTexture = (binding) => ({
+      binding, visibility: GPUShaderStage.FRAGMENT,
+      texture: { sampleType: "unfilterable-float", viewDimension: "2d" },
+    });
+    this.bridgeLayout = device.createBindGroupLayout({
+      label: "present-bridge",
+      entries: [presentTexture(0), presentTexture(1), presentTexture(2),
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: {} }],
+    });
+    this.bridgeUniformBuf = device.createBuffer({
+      label: "soar-bridge-uniforms", size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this._bridgePipelines = new Map();
 
     // Explicit, not `layout: "auto"`: auto would infer a filterable-float
     // entry for prev_tex, and the rgba32float accumulator cannot satisfy it.
@@ -976,6 +1007,8 @@ export class Renderer {
       // meter's).
       aheadMarch: lighting.aheadMarch
         ?? K.QUALITY_PRESETS[this.qualityTier].aheadMarch,
+      fineGradient: lighting.fineGradient
+        ?? K.QUALITY_PRESETS[this.qualityTier].fineGradient,
       // With reprojection on, every march of the picture writes the guide,
       // parked or flying, so a session compiles one march and not two.
       motionGuide,
@@ -1328,6 +1361,9 @@ export class Renderer {
     let sampleWeight = prevCount === 0 ? 1.0 : 1.0 / nextCount;
     let subpixel = prevCount >= 1;
     let jitterScale = 1.0;
+    // Whether the view is held: nothing in the scene key moved, so this
+    // frame is one more sample of the same picture.
+    let still = true;
     this.lastMotionReset = false;
 
     if (this._accumKey === null) {
@@ -1344,6 +1380,7 @@ export class Renderer {
         this.motionBlendAlpha, K.DEFAULT_MOTION_BLEND_REFERENCE_FPS,
         deltaSeconds);
       const resetForJump = this._motionDeltaExceedsReset(origin, forward);
+      still = false;
       this._accumKey = currentKey;
       if (alpha < 1.0 && !resetForJump) {
         prevWeight = 1.0 - alpha; sampleWeight = alpha; nextCount = 1;
@@ -1359,7 +1396,8 @@ export class Renderer {
 
     this._accumLastOrigin = origin;
     this._accumLastForward = forward;
-    return { prevWeight, sampleWeight, nextCount, subpixel, jitterScale };
+    return { prevWeight, sampleWeight, nextCount, subpixel, jitterScale,
+             still };
   }
 
   // --- reprojected history (reproject.js) ---------------------------------
@@ -1409,6 +1447,8 @@ export class Renderer {
     });
     this._history = {
       w, h, index: 0, valid: false,
+      // The scene key of the last frame resolved into it.
+      key: null,
       // Whether the last frame resolved into it was a parked one.
       parked: false,
       color: [make("soar-history-a", ACCUM_FORMAT),
@@ -1422,23 +1462,27 @@ export class Renderer {
   }
 
   /**
-   * A live frame's plan when it goes into the reprojected history. The march
-   * takes the full jitter, and the resolve's block is filled from this
-   * frame's camera and the previous one's. Three cases, told apart as
-   * _accumulationPlan tells them:
+   * Fill the resolve's block for a live frame, from this frame's camera and
+   * the previous one's, and return the history it resolves into. `sampling`
+   * is the frame's jitter (its plan's subpixel and jitterScale), which the
+   * resolve needs to know where each sample's ray went. The history keeps
+   * its own scene key: the in-place average's state is _accumulationPlan's
+   * and is not touched here. Three cases:
    *
    *   parked   nothing in the scene key moved. The history is exactly where
    *            it was, so it is neither decayed, clamped nor filled: the
    *            pass is a running average on the history's grid. On the
    *            first such frame what the history holds (a flight's picture,
    *            or another rung's) is carried in at REPROJECT_PARK_CARRY, to
-   *            begin from and then be outweighed.
+   *            begin from and then be outweighed. A held view is not shown
+   *            from this for long (drawFrame's bridge): it keeps the history
+   *            current for the frames that are, and for the next move.
    *   glide    the key moved under a still camera (exposure, haze, the sun).
    *            The place is exact and the content is not: a short life.
    *   moving   the camera moved: the tier's lifetime, and whatever less each
    *            pixel's own depth spread allows.
    */
-  _reprojectionPlan(u, deltaSeconds, outputSize, renderSize) {
+  _reprojectionPlan(u, deltaSeconds, outputSize, renderSize, sampling) {
     const [hw, hh] = this.historySize(outputSize, renderSize);
     const history = this._historyFor(hw, hh);
     const origin = [u[SLOT.CAM_ORIGIN], u[SLOT.CAM_ORIGIN + 1],
@@ -1447,7 +1491,7 @@ export class Renderer {
                      u[SLOT.CAM_FORWARD + 2]];
     const prev = history.camera;
     const key = sceneKey(u, this._outputW, this._outputH);
-    const parked = history.valid && keysEqual(this._accumKey, key);
+    const parked = history.valid && keysEqual(history.key, key);
     let deltaM = [0, 0, 0];
     let sameCamera = history.valid;
     if (history.valid && !parked) {
@@ -1469,42 +1513,45 @@ export class Renderer {
     }
     const dt = deltaSeconds > 0
       ? deltaSeconds : 1.0 / K.DEFAULT_MOTION_BLEND_REFERENCE_FPS;
-    const NEVER = 1e9;
     let lifeFrames = this.reproject.lifetimeS / dt;
     let params = this.reproject;
-    let countCap = NEVER;
+    let countCap = RESOLVE_NEVER;
     if (parked) {
-      lifeFrames = NEVER;
-      params = { ...params, clampGamma: NEVER, fillWeight: 0.0 };
+      lifeFrames = RESOLVE_NEVER;
+      params = { ...params, clampGamma: RESOLVE_NEVER, fillWeight: 0.0 };
       if (!history.parked) countCap = K.REPROJECT_PARK_CARRY;
     } else if (sameCamera) {
       lifeFrames = K.REPROJECT_GLIDE_FRAMES;
     }
     packResolveUniforms(this._resolveUniforms, u, prev, deltaM, {
       frameIndex: u[SLOT.FRAME_INDEX],
-      jitterScale: this.reproject.jitterScale,
-      subpixel: true,
+      jitterScale: sampling.jitterScale,
+      subpixel: sampling.subpixel,
       historyValid: history.valid,
       lifeFrames, renderSize, historySize: [hw, hh], params, countCap,
     });
     this.device.queue.writeBuffer(this.resolveUniformBuf, 0,
                                   this._resolveUniforms);
     prev.set(u.subarray(0, 16));
-    // The count is of parked frames: what the hold ladder and the sleep ask
-    // about. A frame that was not parked leaves it at one, as a motion
-    // frame of the in-place blend does.
-    const nextCount = parked && history.parked ? this._accumCount + 1 : 1;
+    history.key = key;
     history.valid = true;
     history.parked = parked;
+    return history;
+  }
 
-    this._accumKey = key;
-    this._accumMotion = !parked;
-    this._accumLastOrigin = origin;
-    this._accumLastForward = forward;
-    this.lastMotionReset = false;
-    return { prevWeight: 0.0, sampleWeight: 1.0, nextCount,
-             subpixel: true, jitterScale: this.reproject.jitterScale,
-             history };
+  /**
+   * How much of a held view's picture is its own in-place average after
+   * `count` samples of it: all of it once there are REPROJECT_BRIDGE_FRAMES,
+   * and before that the rest is the history the view is carried over from,
+   * so that stopping, or climbing a hold rung, does not put a one-sample
+   * picture on screen. With no history to come from it is the average
+   * alone. In live hold mode the held picture is the flight's, so it stays
+   * the history.
+   */
+  _bridgeWeight(count, hadHistory) {
+    if (!hadHistory) return 1.0;
+    if (this._holdMode === "live") return 0.0;
+    return Math.min(1.0, count / K.REPROJECT_BRIDGE_FRAMES);
   }
 
   /** The resolve pass: this frame's march into the history. Returns the
@@ -1646,14 +1693,20 @@ export class Renderer {
     // rung switching methods or an override is a scene change: never
     // averaged with the old method, and with a parked camera a clean
     // restart (see methodKey below).
-    // The live view's frames go into the reprojected history, where that is
-    // on, moving or parked; everything else (a capture, Max's several
-    // samples a frame) is averaged in place.
+    // The live view keeps a reprojected history, where that is on. A moving
+    // frame is shown from it. A held view is averaged in place, exactly as a
+    // capture is, and the history is only what the picture is carried over
+    // from while that average builds (see the present below).
+    // A tier that takes several samples a frame (Max, as shipped) has no
+    // use for it: eight fresh samples blended in place are closer to the
+    // converged picture in flight than one history is (measured, congestus
+    // cruise: 1.9 against 2.6 of 255 RMS), because the history's own error
+    // is then larger than the noise it removes.
     const samples = Math.max(1, this.sppPerFrame);
-    const reprojected = this.reproject.on
-      && !this._offline && samples === 1;
-    // The surfaces then filter over the history's pixel, not the march's.
-    const filterFootprint = reprojected
+    const historyOn = this.reproject.on && !this._offline && samples === 1;
+    // While moving, the surfaces filter over the history's pixel, not the
+    // march's. A held view's average is on the march's own grid.
+    const filterFootprint = historyOn && this._cameraMoving
       ? renderSize[0] / this.historySize(outputSize, renderSize)[0] : 1.0;
     const u = packUniforms(state, {
       ...view, outputSize, renderSize,
@@ -1671,7 +1724,8 @@ export class Renderer {
     // ~42% ghost of the old one for a frame before the average restarted.
     // In flight the key changes every frame anyway, and the motion blend is
     // the point, so a moving camera is left to it.
-    const methodKey = `${lighting.lightCache}|${lighting.aheadMarch}`;
+    const methodKey = `${lighting.lightCache}|${lighting.aheadMarch}`
+      + `|${lighting.fineGradient}`;
     if (this._accumMethod !== undefined && methodKey !== this._accumMethod
         && !this._cameraMoving) {
       this._resetAccumulation();
@@ -1682,10 +1736,24 @@ export class Renderer {
     // fs_steam_live does).
     const steamClock = u[SLOT.SCENE_CLOCK];
     if (steamLive) u[SLOT.SCENE_CLOCK] = 0.0;
-    const plan = reprojected
-      ? this._reprojectionPlan(u, deltaSeconds, outputSize, renderSize)
-      : this._accumulationPlan(u, deltaSeconds);
-    if (!reprojected && this._history) this._history.valid = false;
+    const plan = this._accumulationPlan(u, deltaSeconds);
+    let history = null;
+    // Whether the history held a picture before this frame: what a held
+    // view can be carried over from.
+    let hadHistory = false;
+    if (historyOn) {
+      // With a history to average over, a moving frame takes the whole
+      // jitter (the in-place blend holds it back; see _accumulationPlan).
+      if (!plan.still) {
+        plan.subpixel = true;
+        plan.jitterScale = this.reproject.jitterScale;
+      }
+      hadHistory = Boolean(this._history?.valid);
+      history = this._reprojectionPlan(u, deltaSeconds, outputSize,
+                                       renderSize, plan);
+    } else if (this._history) {
+      this._history.valid = false;
+    }
     if (this.reproject.on) this._ensureGuideTarget(targets);
     u[SLOT.SCENE_CLOCK] = steamClock;
     u[SLOT.SUBPIXEL_JITTER] = plan.subpixel ? 1.0 : 0.0;
@@ -1711,12 +1779,13 @@ export class Renderer {
     // decorrelates their jitter.)
     let outTex = null;
     for (let s = 0; s < samples; s++) {
+      const sampleIndex = (view.frameIndex ?? 0) + s * SPP_FRAME_INDEX_STRIDE;
       const step = s === 0 ? plan : this._extraSamplePlan(plan.jitterScale);
       if (s > 0) {
         // Only the three components that differ between samples of one view,
         // for the reason the full repack is avoided above. None of them is in
         // the scene key, so the key computed once still describes all of them.
-        u[SLOT.FRAME_INDEX] = (view.frameIndex ?? 0) + s * SPP_FRAME_INDEX_STRIDE;
+        u[SLOT.FRAME_INDEX] = sampleIndex;
         u[SLOT.SUBPIXEL_JITTER] = step.subpixel ? 1.0 : 0.0;
         u[SLOT.JITTER_SCALE] = step.jitterScale;
         this.device.queue.writeBuffer(this.uniformBuf, 0, u);
@@ -1740,36 +1809,61 @@ export class Renderer {
       this._encodeMarch(enc, targets, this.rayBindGroup, rayPipeline,
                         surfacePipelines, this.reproject.on);
 
-      if (reprojected) {
-        outTex = this._encodeResolve(enc, targets, plan.history);
-      } else {
+      // The in-place average, wherever it is what the picture is or is
+      // becoming: without a history, and for a held view.
+      const inPlace = !historyOn || plan.still;
+      let accTex = null;
+      if (inPlace) {
         // The accumulator ping-pongs between two textures, so there are
         // exactly two bind groups for the whole life of a target set. They
         // are built when the render target is allocated, not every frame.
-        outTex = this._accumIndex === 0 ? targets.accumB : targets.accumA;
-        const p = sPass(outTex.createView());
+        accTex = this._accumIndex === 0 ? targets.accumB : targets.accumA;
+        const p = sPass(accTex.createView());
         p.setPipeline(this.accumPipeline);
         p.setBindGroup(0, targets.accumBindGroups[this._accumIndex]);
         p.draw(3);
         p.end();
       }
+      // The history takes every live frame, held ones too: it is what a
+      // held view is carried over from, and what the next moving frame
+      // continues.
+      const histTex = historyOn
+        ? this._encodeResolve(enc, targets, history) : null;
+      outTex = accTex ?? histTex;
 
       // Only the last sample reaches the screen: the ones before it are the
       // picture being built, and presenting each would be a strobe.
       if (s === samples - 1) {
-        // The live steam goes over whichever image this frame built: the
-        // in-place average, on the march's grid, or the history, on its own.
-        let shown = outTex;
-        if (steamLive && reprojected) {
-          shown = this._encodeSteamOnHistory(enc, targets, plan.history, u,
-                                             steamPipeline);
-        } else if (steamLive) {
-          shown = this._encodeSteam(enc, targets, outTex, steamPipeline);
-        }
+        // The live steam goes over whichever image is shown: the in-place
+        // average, on the march's grid, or the history, on its own.
+        const overAccum = () => (steamLive
+          ? this._encodeSteam(enc, targets, accTex, steamPipeline) : accTex);
+        const overHistory = () => (steamLive
+          ? this._encodeSteamOnHistory(enc, targets, history, u, steamPipeline)
+          : histTex);
         const lensTex = this._encodeLensState(enc, lens, lensPipeline);
-        this._encodeBlit(enc, shown, targetView, targetFormat,
-                         shown.width === outputW && shown.height === outputH,
-                         lensTex);
+        // How much of a held view's picture is its own average yet (1: all
+        // of it), the rest being the history it is carried over from.
+        const own = !historyOn ? 1.0
+          : !inPlace ? 0.0
+          : this._bridgeWeight(step.nextCount, hadHistory);
+        const exact = (tex) => tex.width === outputW && tex.height === outputH;
+        if (own >= 1.0) {
+          outTex = accTex;
+          const shown = overAccum();
+          this._encodeBlit(enc, shown, targetView, targetFormat, exact(shown),
+                           lensTex);
+        } else if (own <= 0.0) {
+          outTex = histTex;
+          const shown = overHistory();
+          this._encodeBlit(enc, shown, targetView, targetFormat, exact(shown),
+                           lensTex);
+        } else {
+          outTex = accTex;
+          this._encodeBridge(enc, overHistory(), overAccum(), own, targetView,
+                             targetFormat, lensTex);
+        }
+        this._lastSteamOnHistory = steamLive && outTex === histTex;
         encodeOverlays(overlays, enc, targetView, targetFormat);
       }
       await this._submit(enc.finish());
@@ -1780,7 +1874,6 @@ export class Renderer {
     }
     this._lastPresented = outTex;
     this._lastSteamLive = steamLive;
-    this._lastSteamOnHistory = steamLive && reprojected;
     return true;
   }
 
@@ -2253,6 +2346,45 @@ export class Renderer {
     return history.live;
   }
 
+  /** The bridge present: `toTex` (a held view's average) at share `own`
+   *  over `fromTex` (the picture it is carried over from). */
+  _encodeBridge(encoder, fromTex, toTex, own, targetView, targetFormat,
+                lensTex = this._lensDry) {
+    let pipeline = this._bridgePipelines.get(targetFormat);
+    if (!pipeline) {
+      pipeline = this.device.createRenderPipeline({
+        label: `present-bridge(${targetFormat})`,
+        layout: this.device.createPipelineLayout({
+          bindGroupLayouts: [this.bridgeLayout],
+        }),
+        vertex: { module: this.presentModule, entryPoint: "vs_main" },
+        fragment: { module: this.presentModule, entryPoint: "fs_bridge",
+                    targets: [{ format: targetFormat }] },
+        primitive: { topology: "triangle-list" },
+      });
+      this._bridgePipelines.set(targetFormat, pipeline);
+    }
+    this.device.queue.writeBuffer(this.bridgeUniformBuf, 0,
+                                  new Float32Array([own, 0, 0, 0]));
+    const p = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: targetView, loadOp: "clear", storeOp: "store",
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+      }],
+    });
+    p.setPipeline(pipeline);
+    p.setBindGroup(0, this.device.createBindGroup({
+      layout: this.bridgeLayout, entries: [
+        { binding: 0, resource: toTex.createView() },
+        { binding: 1, resource: lensTex.createView() },
+        { binding: 2, resource: fromTex.createView() },
+        { binding: 3, resource: { buffer: this.bridgeUniformBuf } },
+      ],
+    }));
+    p.draw(3);
+    p.end();
+  }
+
   _encodeBlit(encoder, srcTex, targetView, targetFormat, exact,
               lensTex = this._lensDry) {
     const entries = [{ binding: 0, resource: srcTex.createView() },
@@ -2380,7 +2512,8 @@ export class Renderer {
       ? preset.lightCache
       : this.lightCacheMode === "on";
     return { lightCache: Boolean(wanted && cacheReady),
-             aheadMarch: preset.aheadMarch };
+             aheadMarch: preset.aheadMarch,
+             fineGradient: preset.fineGradient };
   }
 
   invalidateLightCache() {

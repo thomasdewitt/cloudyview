@@ -76,6 +76,10 @@ const PATHS = {
   strafe: { forward: 0.0, right: 1.0, yaw: 0.0 },
   pan: { forward: 0.3, right: 0.0, yaw: 25.0 },
   turn: { forward: 0.0, right: 0.0, yaw: 25.0 },
+  // Thirty times the opening speed, straight ahead: far enough in a short
+  // flight to cross a periodic domain's edge, where the camera's position
+  // folds back by a domain width and the picture must not notice.
+  dash: { forward: 30.0, right: 0.0, yaw: 0.0 },
   // A fast look-around while cruising: 90 degrees a second.
   whip: { forward: 1.0, right: 0.0, yaw: 90.0 },
   still: { forward: 0.0, right: 0.0, yaw: 0.0 },
@@ -177,8 +181,12 @@ try {
             cam.azimuth = (start.az + path.yaw * t) % 360;
             cam.elevation = start.el;
           };
+          // The scene clock, as the live loop runs it: with the flight, and
+          // through a hold only where the steam is drawn live (the city at
+          // Medium and above); elsewhere a held view's steam stands still.
+          const clockAt = (k) => (R.liveSteamActive ? k : Math.min(k, stopAt)) * dt;
           const viewAt = (k) => ({ ...s._viewKwargs(), frameIndex: k,
-                                   sceneTime: k * dt });
+                                   sceneTime: clockAt(k) });
           const fly = async (onFrame) => {
             R.resetAccumulation();
             R.setCameraMoving(true);
@@ -190,8 +198,10 @@ try {
                 R.setCameraMoving(false);
                 R.holdTick(5.0);
               }
+              // liveSteam as the live loop passes it: the renderer decides
+              // whether this scene and tier draw the steam live.
               await R.drawFrame(target.view, target.format, [W, H], viewAt(k),
-                                { deltaSeconds: dt });
+                                { deltaSeconds: dt, liveSteam: true });
               if (onFrame) await onFrame(k);
             }
           };
@@ -275,7 +285,7 @@ try {
             const view = viewAt(f.k);
             for (let j = 0; j < ${REF_FRAMES}; j++) {
               await R.drawFrame(target.view, target.format, [W, H],
-                                { ...view, frameIndex: j }, {});
+                                { ...view, frameIndex: j }, { liveSteam: true });
             }
             const ref = await grab();
             f.ref = ref;

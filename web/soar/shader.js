@@ -87,7 +87,7 @@ export async function loadShaders(baseUrl) {
 export function specializeShader(source,
                                  { periodic, nested, toneMap = true,
                                    lightCache, motionGuide = false,
-                                   aheadMarch = true }) {
+                                   aheadMarch = true, fineGradient = true }) {
   if (typeof lightCache !== "boolean") {
     throw new Error(
       "specializeShader needs the lighting method: lightCache as a boolean; " +
@@ -96,7 +96,7 @@ export function specializeShader(source,
   const switches = {
     PERIODIC_DOMAIN: periodic, NESTED: nested, TONE_MAP: toneMap,
     LIGHT_CACHE: lightCache, MOTION_GUIDE: motionGuide,
-    AHEAD_MARCH: aheadMarch,
+    AHEAD_MARCH: aheadMarch, FINE_GRADIENT: fineGradient,
   };
   const header = Object.entries(switches)
     .map(([name, on]) => `const ${name}: bool = ${on ? "true" : "false"};\n`)
@@ -112,5 +112,5 @@ export function specializeShader(source,
 export function shaderVariantKey(spec) {
   return [spec.periodic, spec.nested, spec.toneMap, spec.surface,
           spec.lightCache, Boolean(spec.motionGuide),
-          spec.aheadMarch !== false].join("|");
+          spec.aheadMarch !== false, spec.fineGradient !== false].join("|");
 }

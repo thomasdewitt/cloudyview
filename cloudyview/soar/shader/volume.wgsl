@@ -265,8 +265,30 @@ fn coarse_gradient_component(p: vec3<f32>, offset: vec3<f32>, h: f32,
 // weights (1 - w) and w, w = GRADIENT_SHADING_COARSE_WEIGHT, each times a
 // smoothstep of its own confidence, so xyz is a direction and not a
 // gradient in m^-2. The callers use only its direction.
+//
+// Without FINE_GRADIENT only the coarse stencil is taken: six reads for up
+// to twelve, and a normal with the billow's shape and not the skin's
+// voxel-scale texture. That is the cheapest tier's, whose pixels are too
+// coarse to show that texture.
 fn sigma_gradient(p: vec3<f32>, sigma: f32, sample_distance_m: f32,
                   in_nest: bool) -> vec4<f32> {
+    if (!FINE_GRADIENT) {
+        let only_h = max(vec3<f32>(sample_distance_m * CONE_STENCIL_TAN),
+                         level_voxel_size(in_nest)
+                             * GRADIENT_SHADING_RADIUS_VOXELS);
+        let only_grad = sigma_gradient_at_radius(p, only_h, false, in_nest);
+        let only_len = length(only_grad);
+        let only_conf = (
+            only_len * min(min(only_h.x, only_h.y), only_h.z)
+        ) / (sigma + 1e-4);
+        var n = vec3<f32>(0.0);
+        if (only_len > 1e-12) {
+            n = smoothstep(GRADIENT_SHADING_CONF_START,
+                           GRADIENT_SHADING_CONF_FULL, only_conf)
+                * only_grad / only_len;
+        }
+        return vec4<f32>(n, only_conf);
+    }
     let voxel = level_voxel_size(in_nest);
     let fine_h = voxel * GRADIENT_SHADING_RADIUS_VOXELS;
     let fine_grad = sigma_gradient_at_radius(p, fine_h, true, in_nest);

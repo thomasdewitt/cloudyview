@@ -77,12 +77,15 @@ const setup = `(async () => {
   for (const surface of Object.keys(shaders)) {
     for (const nested of onOff) for (const periodic of onOff)
     for (const toneMap of onOff) for (const lightCache of onOff)
-    for (const motionGuide of onOff) for (const aheadMarch of onOff) {
+    for (const motionGuide of onOff) for (const aheadMarch of onOff)
+    for (const fineGradient of onOff) {
+      // The fine stencil is only ever left out with the pre-march (Minimal).
+      if (!fineGradient && aheadMarch) continue;
       // The guide is only ever compiled into a tone-mapped march (the
       // meter's linear one leaves it out).
       if (motionGuide && !toneMap) continue;
       const spec = { periodic, nested, toneMap, lightCache, motionGuide,
-                     aheadMarch };
+                     aheadMarch, fineGradient };
       jobs.push({
         label: surface + " " + Object.entries(spec)
           .filter(([, on]) => on).map(([k]) => k).join("+"),

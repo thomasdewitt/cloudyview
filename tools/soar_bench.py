@@ -185,6 +185,7 @@ def main():
                 view = ViewState(output_size=(out_w, out_h), render_size=size,
                                  jitter=True, light_cache=bool(p["lightCache"]),
                                  ahead_march=bool(p["aheadMarch"]),
+                                 fine_gradient=bool(p["fineGradient"]),
                                  **look, **views[name])
                 # Untimed: compiles the pipelines and, for the scene's first
                 # view, bakes the light cache.

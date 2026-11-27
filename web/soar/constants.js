@@ -440,8 +440,10 @@ export const REPROJECT_DEFAULT = true;
 // Most pixels of a moving view are held to less by their own depth spread
 // (REPROJECT_DRIFT_BUDGET_PX). The motion-smoothing slider sets it: its
 // [0, 1] is [0, REPROJECT_LIFETIME_MAX_S] seconds, so a tier's default
-// smoothing is also its default lifetime. REPROJECT_LIFETIME_S is what a
-// renderer holds until a tier's default is applied.
+// smoothing would also be its default lifetime, but the lifetime is not a
+// thing a tier should set: it costs nothing, and what limits it is the
+// geometry, not the machine. So every tier's default is REPROJECT_LIFETIME_S,
+// and the slider moves it only once it is moved by hand.
 export const REPROJECT_LIFETIME_S = 0.5;
 export const REPROJECT_LIFETIME_MAX_S = 1.0;
 // How far, in history pixels, one motion per pixel may misplace the
@@ -467,6 +469,11 @@ export const REPROJECT_GLIDE_FRAMES = 2.0;
 // holds is carried in at no more than this many samples' weight, so that the
 // parked samples take the picture over within a few frames.
 export const REPROJECT_PARK_CARRY = 2.0;
+// A held view is the in-place average of its own samples, as a capture is.
+// Its first samples are a noisy picture, so for this many of them the view
+// is shown as a mix with the history it stopped on (or climbed a hold rung
+// from), the average's share growing by one part in this many a sample.
+export const REPROJECT_BRIDGE_FRAMES = 8;
 // With a history to average over, a moving frame takes the whole of the
 // sub-pixel and march-phase jitter (DEFAULT_MOTION_JITTER_SCALE holds it
 // back for the unreprojected blend, which shows each frame's noise).
@@ -582,13 +589,20 @@ export const LIGHT_CACHE_BAKE_SLICES_PER_FRAME = 8;
 // of their march-pass time and moved their converged picture by 0.15-0.26 of
 // 255 RMS, under their own sampling grain.
 //
+// `fineGradient` is whether the shading normal blends in the one-voxel
+// stencil (volume.wgsl sigma_gradient), also part of the lighting method.
+// Minimal leaves it out: 15.7% of its march-pass time for a change of 0.54
+// of 255 RMS, at its own sampling grain (0.63). At Low the same change is
+// 1.8 times the grain in the median view, a call for the eye; from Medium up
+// it shows.
+//
 // `haze` is the aerosol coordinate; the comment gives its sea-level
 // e-folding length.
 export const QUALITY_PRESETS = {
   max: {
     name: "max", label: "Max",
     renderScale: 1.0, cityRenderScale: 1.0, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
-    sppPerFrame: 8, lightCache: false, aheadMarch: true,
+    sppPerFrame: 8, lightCache: false, aheadMarch: true, fineGradient: true,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 32,
     haze: -0.0380,       // 70 km
     lodStrength: 0.5, autoExposure: true,
@@ -598,7 +612,7 @@ export const QUALITY_PRESETS = {
   high: {
     name: "high", label: "High",
     renderScale: 1.0, cityRenderScale: 0.7, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
-    sppPerFrame: 1, lightCache: true, aheadMarch: true,
+    sppPerFrame: 1, lightCache: true, aheadMarch: true, fineGradient: true,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 32,
     haze: -0.0380,       // 70 km
     lodStrength: 0.5, autoExposure: true,
@@ -608,7 +622,7 @@ export const QUALITY_PRESETS = {
   medium: {
     name: "medium", label: "Medium",
     renderScale: 0.70, cityRenderScale: 0.5, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.5, lightStepFactor: 4.0,
-    sppPerFrame: 1, lightCache: true, aheadMarch: true,
+    sppPerFrame: 1, lightCache: true, aheadMarch: true, fineGradient: true,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 24,
     haze: 0.4027,        // 25.2 km
     lodStrength: 1.05, autoExposure: true,
@@ -618,7 +632,7 @@ export const QUALITY_PRESETS = {
   low: {
     name: "low", label: "Low",
     renderScale: 0.30, cityRenderScale: 0.2, historyScale: 0.6, cityHistoryScale: 1.0, stepFactor: 3.0, lightStepFactor: 8.0,
-    sppPerFrame: 1, lightCache: true, aheadMarch: false,
+    sppPerFrame: 1, lightCache: true, aheadMarch: false, fineGradient: true,
     holdRungs: [{ scale: 0.50, sampling: "low" }],
     holdRenderScale: 0.5, parkedFrames: 16,
     haze: 0.6590,        // 15 km
@@ -634,7 +648,7 @@ export const QUALITY_PRESETS = {
   minimal: {
     name: "minimal", label: "Minimal",
     renderScale: 0.125, cityRenderScale: 0.125, historyScale: 0.25, cityHistoryScale: 0.5, stepFactor: 4.0, lightStepFactor: 12.0,
-    sppPerFrame: 1, lightCache: true, aheadMarch: false,
+    sppPerFrame: 1, lightCache: true, aheadMarch: false, fineGradient: false,
     holdRungs: [{ scale: 0.25, sampling: "minimal" }],
     holdRenderScale: 0.25, parkedFrames: 8,
     haze: 1.0905,        // 8 km
@@ -644,6 +658,77 @@ export const QUALITY_PRESETS = {
   },
 };
 export const QUALITY_TIER_NAMES = ["max", "high", "medium", "low", "minimal"];
+
+// --- the even ladder (?ladder=even): a candidate, not the default ----------
+//
+// The tiers above are unevenly spaced in cost: with the GPU full, High is
+// about 2.9 times Medium, Medium 8.5 times Low and Low 7.7 times Minimal
+// (benchmarking/2026-11-27-void-census/tier_cost.md), so a machine that just
+// misses a tier falls a long way. With the reprojected history on, what a
+// moving view looks like depends only weakly on its render scale, so the
+// render scale can do the spacing. The even ladder keeps each tier's look
+// (steps, level of detail, haze, lighting method) and sets its flight render
+// scale so that each tier costs the same factor less than the one above:
+//
+//   - Max is the top: full scale, ONE sample a frame, the sun marched.
+//   - Minimal is the bottom, at the render scale it has today.
+//   - The factor between is then the fourth root of Max's cost over
+//     Minimal's.
+//
+// TIER_LOOK_COST is what each tier's look costs per frame of pixels:
+// march-pass GPU ms at 2560x1440 with the GPU full, on an RTX 5080, means
+// over nine fields and ten views (tier_cost.md's throughput, divided by the
+// tier's render scale squared). Max's is 3.0 times High's: one marched-sun
+// sample a frame against High's cached one, the mean over the seven fields
+// whose sun is above 30 degrees (results.md section 7). The marched sun
+// costs as 1 / sin(elevation), and over the two fields with a 4.5 degree
+// sun it is 21 and 42 times High, so at a low sun Max is not on this ladder
+// at all; nothing here bounds that.
+export const TIER_LOOK_COST = {
+  max: 18.6, high: 6.205, medium: 4.50, low: 2.844, minimal: 2.176,
+};
+
+/** The even ladder: `{ ratio, scales: { tier: renderScale } }`. */
+export function evenLadder() {
+  const order = QUALITY_TIER_NAMES;                    // dearest first
+  const top = TIER_LOOK_COST.max;
+  const floorScale = QUALITY_PRESETS.minimal.renderScale;
+  const floor = TIER_LOOK_COST.minimal * floorScale * floorScale;
+  const ratio = Math.pow(top / floor, 1 / (order.length - 1));
+  const scales = {};
+  order.forEach((tier, n) => {
+    const scale = Math.sqrt(top / Math.pow(ratio, n) / TIER_LOOK_COST[tier]);
+    scales[tier] = Math.round(Math.min(1.0, scale) * 1000) / 1000;
+  });
+  scales.max = 1.0;
+  scales.minimal = floorScale;
+  return { ratio, scales };
+}
+
+let evenLadderApplied = false;
+/**
+ * Put the even ladder in force for this page: each tier's flight render
+ * scale, a history of twice that (never more than the output), a hold scale
+ * no lower than the flight scale, Max at one sample a frame, and the
+ * auto-tier gate's ratio the ladder's own at every step. Once; before a
+ * viewer is made. Returns the ladder.
+ */
+export function applyEvenLadder() {
+  const ladder = evenLadder();
+  if (evenLadderApplied) return ladder;
+  evenLadderApplied = true;
+  for (const [tier, scale] of Object.entries(ladder.scales)) {
+    const preset = QUALITY_PRESETS[tier];
+    preset.renderScale = scale;
+    preset.historyScale = Math.min(1.0, Math.round(2000 * scale) / 1000);
+    preset.holdRenderScale = Math.max(preset.holdRenderScale, scale);
+  }
+  QUALITY_PRESETS.max.sppPerFrame = 1;
+  for (const tier of Object.keys(AUTO_TIER_COST_RATIO_TO_NEXT)) {
+    AUTO_TIER_COST_RATIO_TO_NEXT[tier] = ladder.ratio;
+  }
+  return ladder;
+}
 // The surface stages each traced surface runs before the march, in order:
 // shader fragment entries, each after the first reading the one before, the
 // last writing the surface the march reads. The city: its boxes, the facade

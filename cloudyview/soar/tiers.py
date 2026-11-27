@@ -16,6 +16,9 @@ the two together.
 #                 on each sightline, which opens the deep-shadow fill toward
 #                 a cloud's far edge). Low and Minimal leave it out: it was
 #                 27-31% of their march for under one display level
+#   fine_gradient  blend the one-voxel stencil into the shading normal.
+#                 Minimal leaves it out: 15.7% of its march for a change at
+#                 its own sampling grain (0.54 of 255 RMS against 0.63)
 #   accumulate    passes averaged into the image (the browser's parkedFrames)
 #   city_roof_density   the night city's roof clutter: a factor on the
 #                 probability of each clutter slot on a roof (tanks,
@@ -24,19 +27,19 @@ the two together.
 #                 tuned at; the higher tiers can afford more.
 QUALITY_PRESETS = {
     "max":     {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": False, "ahead_march": True,  "accumulate": 32,
+                "light_cache": False, "ahead_march": True, "fine_gradient": True,  "accumulate": 32,
                 "city_roof_density": 1.4},
     "high":    {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True, "ahead_march": True,   "accumulate": 32,
+                "light_cache": True, "ahead_march": True, "fine_gradient": True,   "accumulate": 32,
                 "city_roof_density": 1.4},
     "medium":  {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True, "ahead_march": True,   "accumulate": 24,
+                "light_cache": True, "ahead_march": True, "fine_gradient": True,   "accumulate": 24,
                 "city_roof_density": 1.2},
     "low":     {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True, "ahead_march": False,  "accumulate": 16,
+                "light_cache": True, "ahead_march": False, "fine_gradient": True,  "accumulate": 16,
                 "city_roof_density": 0.7},
     "minimal": {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True, "ahead_march": False,  "accumulate": 8,
+                "light_cache": True, "ahead_march": False, "fine_gradient": False,  "accumulate": 8,
                 "city_roof_density": 0.5},
 }
 

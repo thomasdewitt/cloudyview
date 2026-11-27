@@ -18,8 +18,12 @@
 //                                   premarch_tau_ahead); without it a sample
 //                                   is lit as if nothing lay ahead of it on
 //                                   the sightline
+//     const FINE_GRADIENT: bool     the shading normal blends a one-voxel
+//                                   stencil with the distance-sized one
+//                                   (volume.wgsl sigma_gradient); without it
+//                                   the distance-sized one alone
 //
-// A seventh switch, CITY (the surface under the clouds is the night city, not
+// An eighth switch, CITY (the surface under the clouds is the night city, not
 // the sea), comes with the surface: city/layout.wgsl declares it true and
 // the stand-in city/absent.wgsl declares it false.
 //

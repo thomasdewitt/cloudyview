@@ -28,10 +28,14 @@
 // Where nothing can be kept, the pixel is this frame's samples alone, which
 // is what a pixel of the unreprojected renderer is.
 //
-// A parked view goes through the same pass (Renderer._reprojectionPlan): the
-// two cameras are then one, every history pixel is exactly where it was, and
-// the pass is a plain running average on the history's grid, begun from
-// whatever the flight left there.
+// A held view is not this pass's picture. It is averaged in place, on the
+// grid it is marched on, exactly as a capture is (renderer.js ACCUM_SHADER).
+// The history still takes every held frame (the two cameras are then one,
+// and the pass is a plain running average on the history's grid), for two
+// reasons: it is what the held view is shown from, in a shrinking share,
+// while its own average has only a few samples (Renderer._bridgeWeight), so
+// that stopping does not put a one-sample picture on screen; and it is what
+// the next moving frame continues from.
 
 "use strict";
 

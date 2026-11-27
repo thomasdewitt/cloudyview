@@ -271,6 +271,16 @@ export class Viewer {
   }
 
   async start(source, progress) {
+    // ?ladder=even flies the evenly spaced tiers (constants.js evenLadder)
+    // in place of the shipped ones, for comparing the two on one machine.
+    const ladder = new URLSearchParams(location.search).get("ladder");
+    if (ladder === "even") {
+      const { ratio, scales } = K.applyEvenLadder();
+      console.info(`soar: the even ladder, ${ratio.toFixed(2)}x a tier: ` +
+                   JSON.stringify(scales));
+    } else if (ladder !== null) {
+      throw new Error(`?ladder=${ladder}: expected 'even'.`);
+    }
     const shaders = await loadShaders(new URL("./shader/", import.meta.url));
     this.shaders = shaders.modules;
     this.lensSource = shaders.lens;

@@ -109,11 +109,11 @@ strengths; those are constants in the shader, next to the terms they scale.
 4. **Present**: the average, with lens water and the overlays (minimap,
    the bird or paper plane), goes to the screen.
 
-Step 3 has two forms. A still, a video frame and everything Python renders
-are averaged in place, on the grid they were marched on. The browser's live
-view keeps a **reprojected history** instead (`web/soar/reproject.js`;
-`?reproject=0` goes back to averaging in place, with a blend at fixed
-screen positions while moving): an image at its own, finer size that follows the rays from
+Step 3 has two forms. A view that is not moving is averaged in place, on
+the grid it was marched on: a still, a video frame, everything Python
+renders, and a view held in the browser. A view that is moving in the
+browser is shown from a **reprojected history** (`web/soar/reproject.js`;
+`?reproject=0` goes back to a blend at fixed screen positions): an image at its own, finer size that follows the rays from
 one frame's camera to the next, so a moving view is an average too. For
 that, the march is compiled with `MOTION_GUIDE` and also returns, per pixel,
 the first two moments of inverse distance over what the pixel shows. The
@@ -122,8 +122,10 @@ badly one motion fits a pixel made of cloud at several depths, and the
 history is kept only as long as that misfit stays small: indefinitely under
 a turn, a few frames beside a near cloud edge at speed. Each march sample is
 blended in where its jittered ray landed, which is how a march at 0.3 of the
-output's size fills a grid at 0.6 over a few frames. A parked view runs the
-same pass with the two cameras equal.
+output's size fills a grid at 0.6 over a few frames. When the camera stops,
+the in-place average starts again from nothing, and for its first eight
+samples the view is shown as a mix of that average and the history it
+stopped on, so the picture is carried over and not restarted.
 
 The optical depth toward the sun is the expensive part. It is either marched
 per sample (`light_march_tau`) or read from the **light cache**: a 3D
@@ -149,7 +151,9 @@ and `witness --quality` renders the same thing from Python.
 | Minimal | 0.125 | 0.25 | 4 | 12 | cache | 8 km |
 
 The history scale is the reprojected history's size as a fraction of the
-output's. Max is still averaged in place.
+output's. Max, which takes eight samples a frame, is blended in place: with
+that many fresh samples the history's own error is larger than the noise it
+would remove.
 
 Over the night city the history is the whole output (half of it at
 Minimal), and the tiers fly at their own render scales: High 0.7, Medium

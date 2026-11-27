@@ -284,15 +284,17 @@ export const settings = {
    * The Quality panel's motion-smoothing slider, in smoothing units: 0 is
    * none, 1 is as deep as this tier allows. The renderer still holds an
    * alpha, which runs the other way — see motionAlphaForSmoothing. With the
-   * reprojected history on, the same slider is how long that history is
-   * believed (REPROJECT_LIFETIME_MAX_S at 1).
+   * reprojected history on, the same slider, once moved by hand, is how
+   * long that history is believed (REPROJECT_LIFETIME_MAX_S at 1); until
+   * then every tier's is REPROJECT_LIFETIME_S.
    */
   setMotionSmoothing(smoothing, { byHand = true } = {}) {
     if (byHand) this._byHand.add("smoothing");
     this.renderer.motionBlendAlpha = K.motionAlphaForSmoothing(
       smoothing, this.renderer.qualityTier);
-    this.renderer.reproject.lifetimeS =
-      Math.max(0, Math.min(1, Number(smoothing))) * K.REPROJECT_LIFETIME_MAX_S;
+    this.renderer.reproject.lifetimeS = this._byHand.has("smoothing")
+      ? Math.max(0, Math.min(1, Number(smoothing))) * K.REPROJECT_LIFETIME_MAX_S
+      : K.REPROJECT_LIFETIME_S;
     this._wake("motion smoothing");
   },
 
