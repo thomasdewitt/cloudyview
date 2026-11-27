@@ -45,6 +45,10 @@ timing
                     distance the census found, dilated 3x3 and widened by
                     two steps; a pixel with no cloud near it skips the march
       oracle_t16    the same per 16x16-pixel tile
+      oracle_null   the oracle patch reading a texture that clamps nothing
+                    (t_near -inf, t_far +inf on every pixel): what the clamp
+                    itself costs, its load, branch and live values. The
+                    oracle arms' saving is the ceiling less this cost.
     The oracle reads its distances from group 1 binding 0 (the traced
     surface, which the ocean module never reads), so it pays the one
     textureLoad a real pre-pass would also add, and none of the pre-pass's
@@ -379,6 +383,14 @@ def oracle_array(t_first, t_last, seen, tile, dt_view, lod_tan):
     return out
 
 
+def null_oracle_array(h, w):
+    """(h, w, 4) rgba32float for oracle_null: has_cloud everywhere, with a
+    range that leaves t_near and t_far as the box test set them."""
+    out = np.zeros((h, w, 4), np.float32)
+    out[..., 0], out[..., 1], out[..., 2] = -3e38, 3e38, 1.0
+    return out
+
+
 def block_max_mean(a: np.ndarray, block=WARP) -> float:
     """Mean over pixels of the max over each block of pixels (bw x bh): the
     iterations a SIMD group covering that block runs, per pixel."""
@@ -532,6 +544,11 @@ def timing_main(args):
     _, device = sv.make_device(timestamps=True, float32_filterable=True)
     rev = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=sv.REPO,
                          capture_output=True, text=True).stdout.strip()
+    cells = None
+    if args.cells:
+        cells = {tuple(c) for c in json.loads(Path(args.cells).read_text())}
+        args.demos = ",".join(dict.fromkeys(c[0] for c in cells))
+        args.tiers = ",".join(dict.fromkeys(c[1] for c in cells))
     out = open(args.out, "a")
     for demo in args.demos.split(","):
         level, meta, periodic, r, views, placement = setup_demo(
@@ -546,6 +563,8 @@ def timing_main(args):
             for name in views:
                 if args.views and name not in args.views.split(","):
                     continue
+                if cells is not None and (demo, tier, name) not in cells:
+                    continue
                 view = sv.make_view(views[name], look, (out_w, out_h), size)
                 r.use_zero_field(False)
                 tf, tl, seen = oracle_inputs(r, state, view, args.frames)
@@ -554,16 +573,19 @@ def timing_main(args):
                                                      state.dt_view, lt))
                 tex_t16 = r.data_texture(oracle_array(tf, tl, seen, 16,
                                                       state.dt_view, lt))
+                tex_null = r.data_texture(null_oracle_array(*tf.shape))
                 arms = [sv.Arm("full", "stock"),
                         sv.Arm("zero", "stock", zero_field=True),
                         sv.Arm("nomarch", "nomarch"),
                         sv.Arm("nomarch_live", "nomarch_live"),
                         sv.Arm("oracle_px", "oracle", group1_texture=tex_px),
-                        sv.Arm("oracle_t16", "oracle", group1_texture=tex_t16)]
+                        sv.Arm("oracle_t16", "oracle", group1_texture=tex_t16),
+                        sv.Arm("oracle_null", "oracle", group1_texture=tex_null)]
                 res = sv.time_variants(r, state, view, arms, frames=args.frames,
                                        repeats=args.repeats)
                 tex_px.destroy()
                 tex_t16.destroy()
+                tex_null.destroy()
                 rec = dict(kind="timing", label=args.label, rev=rev, demo=demo,
                            tier=tier, view=name, size=list(size),
                            output=[out_w, out_h], frames=args.frames,
@@ -579,7 +601,7 @@ def timing_main(args):
                 print(f"{demo:11s}{tier:8s}{name:18s} gpu ms: full {g('full'):7.3f} "
                       f"zero {g('zero'):7.3f} nomarch {g('nomarch'):6.3f} "
                       f"live {g('nomarch_live'):6.3f} oracle_px {g('oracle_px'):7.3f} "
-                      f"t16 {g('oracle_t16'):7.3f}  wall full "
+                      f"t16 {g('oracle_t16'):7.3f} null {g('oracle_null'):7.3f}  wall full "
                       f"{sm['full']['wall_ms']['min']:7.2f}  max spread {sp:.2f}",
                       flush=True)
         del r
@@ -612,6 +634,10 @@ def main():
             p.add_argument("--frames", type=int, default=8)
             p.add_argument("--repeats", type=int, default=5)
             p.add_argument("--label", default="run")
+            p.add_argument("--cells", default=None,
+                           help="a JSON list of [demo, tier, view] to time "
+                                "(for rerunning noisy cells); overrides "
+                                "--demos and --tiers")
     p = sub.add_parser("report")
     p.add_argument("jsonl", nargs="+")
     p.add_argument("--md", required=True)
