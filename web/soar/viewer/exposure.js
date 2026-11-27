@@ -93,7 +93,10 @@ export const exposure = {
         return null;
       })
       .then((highlight) => {
-        if (!(highlight > 0) || this._disposed || !this.autoExposure) return;
+        // A measurement of a renderer since replaced (another field loaded
+        // while it was in flight) says nothing about this one's exposure.
+        if (!(highlight > 0) || this._disposed || !this.autoExposure
+            || this.renderer !== renderer) return;
         // The one statement of the target formula (a capture applies the
         // same one directly, with no glide) — see autoExposureTarget.
         const target = autoExposureTarget(highlight, this.toneMapWhitePoint);
