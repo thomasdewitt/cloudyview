@@ -27,6 +27,11 @@
 //     is pulled into their range before it is used.
 // Where nothing can be kept, the pixel is this frame's samples alone, which
 // is what a pixel of the unreprojected renderer is.
+//
+// A parked view goes through the same pass (Renderer._reprojectionPlan): the
+// two cameras are then one, every history pixel is exactly where it was, and
+// the pass is a plain running average on the history's grid, begun from
+// whatever the flight left there.
 
 "use strict";
 
@@ -76,7 +81,8 @@ struct ResolveUniforms {
     subpixel: f32,
     // History pixels per radian at the image centre.
     px_per_rad: f32,
-    pad0: f32,
+    // The most weight (samples) the history is carried in at.
+    count_cap: f32,
     pad1: f32,
     pad2: f32,
 };
@@ -248,6 +254,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> ResolveOut {
               + w11 * textureLoad(hist_aux, vec2<i32>(i1.x, i1.y), 0).y;
     }
 
+    count = min(count, ru.count_cap);
+
     // How long the history may live, in frames. One motion was used for
     // contributions whose inverse distances spread by sqrt(rho_var); each
     // frame of sideways travel therefore misplaces them by that spread times
@@ -331,11 +339,11 @@ export function defaultReprojection() {
  * Fill `out` (a Float32Array of RESOLVE_UNIFORM_FLOATS) for one frame.
  * `u` is this frame's march block and `prev` the previous frame's first 16
  * floats (its camera rows); `deltaM` is cameraDelta's answer; `params` is
- * the renderer's reprojection record.
+ * the renderer's reprojection record, as this frame uses it.
  */
 export function packResolveUniforms(out, u, prev, deltaM, {
   frameIndex, jitterScale, subpixel, historyValid, lifeFrames,
-  renderSize, historySize, params,
+  renderSize, historySize, params, countCap,
 }) {
   out.set(u.subarray(0, 16), 0);
   // Rows 2.w and 3.w hold exposure and the march-jitter switch in the march
@@ -361,7 +369,7 @@ export function packResolveUniforms(out, u, prev, deltaM, {
   out[38] = params.fillWeight;
   out[39] = subpixel ? 1.0 : 0.0;
   out[40] = historySize[0] / (2.0 * u[3]);
-  out[41] = 0.0;
+  out[41] = countCap;
   out[42] = 0.0;
   out[43] = 0.0;
   return out;

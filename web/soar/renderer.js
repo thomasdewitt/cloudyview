@@ -799,7 +799,9 @@ export class Renderer {
     this.renderScale = rung.scale;
     this.stepFactor = rung.stepFactor;
     this.lightStepFactor = rung.lightStepFactor;
-    if (changed) this._resetAccumulation();
+    // A new rung is the same view sampled differently: the count starts
+    // again, and a reprojected history is kept to begin from.
+    if (changed) this._resetAccumulation({ keepHistory: true });
   }
 
   /**
@@ -1245,16 +1247,22 @@ export class Renderer {
     // dimensions. Null it: the first frame at the new size is unjittered and
     // clean.
     this._lastPresented = null;
-    this._resetAccumulation();
+    // The history has its own size, and survives a change of the march's.
+    this._resetAccumulation({ keepHistory: true });
     return this._targets;
   }
 
   // --- accumulation -------------------------------------------------------
 
-  _resetAccumulation() {
+  _resetAccumulation({ keepHistory = false } = {}) {
     // Whatever restarts the average also ends the history's validity: it
-    // holds frames of a scene, a size or a sampling that no longer applies.
-    if (this._history) this._history.valid = false;
+    // holds frames of a scene that no longer applies. A change of sampling
+    // alone (a hold rung, the march's size) keeps it, as something to begin
+    // from: _reprojectionPlan then carries it in at a capped weight.
+    if (this._history) {
+      if (!keepHistory) this._history.valid = false;
+      this._history.parked = false;
+    }
     this._accumKey = null;
     this._accumCount = 0;
     this._accumIndex = 0;
@@ -1339,8 +1347,11 @@ export class Renderer {
   /** The history's size for an output and a march size: the tier's
    *  historyScale of the output, never smaller than the march. */
   historySize(outputSize, renderSize) {
+    // Never below what a held view climbs to, so the history is one size
+    // from flight to the top of the hold ladder.
     const scale = this.historyScaleOverride
-      ?? K.QUALITY_PRESETS[this.qualityTier].historyScale;
+      ?? Math.max(K.QUALITY_PRESETS[this.qualityTier].historyScale,
+                  this._holdRenderScale);
     const size = renderTargetSize(outputSize, Math.min(1.0, scale));
     return [Math.max(size[0], renderSize[0]), Math.max(size[1], renderSize[1])];
   }
@@ -1376,6 +1387,8 @@ export class Renderer {
     });
     this._history = {
       w, h, index: 0, valid: false,
+      // Whether the last frame resolved into it was a parked one.
+      parked: false,
       color: [make("soar-history-a", ACCUM_FORMAT),
               make("soar-history-b", ACCUM_FORMAT)],
       aux: [make("soar-history-aux-a", HISTORY_AUX_FORMAT),
@@ -1387,11 +1400,21 @@ export class Renderer {
   }
 
   /**
-   * A moving frame's plan when it goes into the reprojected history: the
-   * march takes the full jitter, and the resolve's block is filled from this
-   * frame's camera and the previous one's. The accumulation state is left as
-   * a motion frame of the in-place blend leaves it, so that the frame after
-   * the camera stops restarts the parked average cleanly.
+   * A live frame's plan when it goes into the reprojected history. The march
+   * takes the full jitter, and the resolve's block is filled from this
+   * frame's camera and the previous one's. Three cases, told apart as
+   * _accumulationPlan tells them:
+   *
+   *   parked   nothing in the scene key moved. The history is exactly where
+   *            it was, so it is neither decayed, clamped nor filled: the
+   *            pass is a running average on the history's grid. On the
+   *            first such frame what the history holds (a flight's picture,
+   *            or another rung's) is carried in at REPROJECT_PARK_CARRY, to
+   *            begin from and then be outweighed.
+   *   glide    the key moved under a still camera (exposure, haze, the sun).
+   *            The place is exact and the content is not: a short life.
+   *   moving   the camera moved: the tier's lifetime, and whatever less each
+   *            pixel's own depth spread allows.
    */
   _reprojectionPlan(u, deltaSeconds, outputSize, renderSize) {
     const [hw, hh] = this.historySize(outputSize, renderSize);
@@ -1401,10 +1424,18 @@ export class Renderer {
     const forward = [u[SLOT.CAM_FORWARD], u[SLOT.CAM_FORWARD + 1],
                      u[SLOT.CAM_FORWARD + 2]];
     const prev = history.camera;
+    const key = sceneKey(u, this._outputW, this._outputH);
+    const parked = history.valid && keysEqual(this._accumKey, key);
     let deltaM = [0, 0, 0];
-    if (history.valid) {
+    let sameCamera = history.valid;
+    if (history.valid && !parked) {
       deltaM = cameraDelta(origin, prev, this.periodic,
                            this.scene.bmin, this.scene.bmax);
+      // The camera rows but for their fourth columns' exposure and jitter
+      // switch (rows 2 and 3), which are not the camera's.
+      for (let i = 0; i < 15 && sameCamera; i++) {
+        if (i !== 11 && u[i] !== prev[i]) sameCamera = false;
+      }
       // A jump (a map click, a reset) is not a motion to follow.
       let dot = 0;
       for (let i = 0; i < 3; i++) dot += forward[i] * prev[4 + i];
@@ -1416,26 +1447,40 @@ export class Renderer {
     }
     const dt = deltaSeconds > 0
       ? deltaSeconds : 1.0 / K.DEFAULT_MOTION_BLEND_REFERENCE_FPS;
+    const NEVER = 1e9;
+    let lifeFrames = this.reproject.lifetimeS / dt;
+    let params = this.reproject;
+    let countCap = NEVER;
+    if (parked) {
+      lifeFrames = NEVER;
+      params = { ...params, clampGamma: NEVER, fillWeight: 0.0 };
+      if (!history.parked) countCap = K.REPROJECT_PARK_CARRY;
+    } else if (sameCamera) {
+      lifeFrames = K.REPROJECT_GLIDE_FRAMES;
+    }
     packResolveUniforms(this._resolveUniforms, u, prev, deltaM, {
       frameIndex: u[SLOT.FRAME_INDEX],
       jitterScale: this.reproject.jitterScale,
       subpixel: true,
       historyValid: history.valid,
-      lifeFrames: this.reproject.lifetimeS / dt,
-      renderSize, historySize: [hw, hh],
-      params: this.reproject,
+      lifeFrames, renderSize, historySize: [hw, hh], params, countCap,
     });
     this.device.queue.writeBuffer(this.resolveUniformBuf, 0,
                                   this._resolveUniforms);
     prev.set(u.subarray(0, 16));
+    // The count is of parked frames: what the hold ladder and the sleep ask
+    // about. A frame that was not parked leaves it at one, as a motion
+    // frame of the in-place blend does.
+    const nextCount = parked && history.parked ? this._accumCount + 1 : 1;
     history.valid = true;
+    history.parked = parked;
 
-    this._accumKey = sceneKey(u, this._outputW, this._outputH);
-    this._accumMotion = true;
+    this._accumKey = key;
+    this._accumMotion = !parked;
     this._accumLastOrigin = origin;
     this._accumLastForward = forward;
     this.lastMotionReset = false;
-    return { prevWeight: 0.0, sampleWeight: 1.0, nextCount: 1,
+    return { prevWeight: 0.0, sampleWeight: 1.0, nextCount,
              subpixel: true, jitterScale: this.reproject.jitterScale,
              history };
   }
@@ -1605,11 +1650,11 @@ export class Renderer {
     // fs_steam_live does).
     const steamClock = u[SLOT.SCENE_CLOCK];
     if (steamLive) u[SLOT.SCENE_CLOCK] = 0.0;
-    // A moving frame goes into the reprojected history, where that is on;
-    // everything else (a parked view, a capture, Max's several samples a
-    // frame, the live steam's picture) is averaged in place as before.
+    // The live view's frames go into the reprojected history, where that is
+    // on, moving or parked; everything else (a capture, Max's several
+    // samples a frame, the live steam's picture) is averaged in place.
     const samples = Math.max(1, this.sppPerFrame);
-    const reprojected = this.reproject.on && this._cameraMoving
+    const reprojected = this.reproject.on
       && !this._offline && !steamLive && samples === 1;
     const plan = reprojected
       ? this._reprojectionPlan(u, deltaSeconds, outputSize, renderSize)

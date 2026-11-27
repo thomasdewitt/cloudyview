@@ -446,6 +446,14 @@ export const REPROJECT_CLAMP_GAMMA = 1.5;
 // The least weight, in samples, of this frame's soft estimate of a pixel
 // (the fill; reproject.js adds to it where the history is short-lived).
 export const REPROJECT_FILL_WEIGHT = 0.02;
+// A change of the scene under a still camera (the exposure gliding, a haze
+// slider) keeps the history's place and not its content: the history then
+// lives this many frames.
+export const REPROJECT_GLIDE_FRAMES = 2.0;
+// When a view parks, or its sampling changes rung, what the history already
+// holds is carried in at no more than this many samples' weight, so that the
+// parked samples take the picture over within a few frames.
+export const REPROJECT_PARK_CARRY = 2.0;
 // With a history to average over, a moving frame takes the whole of the
 // sub-pixel and march-phase jitter (DEFAULT_MOTION_JITTER_SCALE holds it
 // back for the unreprojected blend, which shows each frame's noise).

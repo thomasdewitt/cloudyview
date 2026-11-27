@@ -68,6 +68,10 @@ const PATHS = {
   pan: { forward: 0.3, right: 0.0, yaw: 25.0 },
   turn: { forward: 0.0, right: 0.0, yaw: 25.0 },
   still: { forward: 0.0, right: 0.0, yaw: 0.0 },
+  // A cruise that stops dead at frame `stopAt` and holds, with the hold
+  // ladder running as the live loop runs it. Scored 1, 4, 8, 16 and 32
+  // frames after the stop: what stopping does to the picture.
+  stop: { forward: 1.0, right: 0.0, yaw: 0.0, stopAt: 40 },
 };
 
 const server = await serveTree(webDir);
@@ -127,8 +131,9 @@ try {
                           az: cam.start.azimuth, el: cam.start.elevation };
           const [fwd, right] = camMod.cameraBasis(start.az, start.el);
           const speed = cam.startSpeed;
+          const stopAt = path.stopAt ?? Infinity;
           const pose = (k) => {
-            const t = k * dt;
+            const t = Math.min(k, stopAt) * dt;
             const a = path.forward * speed * t, b = path.right * speed * t;
             cam.position = [start.pos[0] + a * fwd[0] + b * right[0],
                             start.pos[1] + a * fwd[1] + b * right[1],
@@ -144,6 +149,12 @@ try {
             R.setCameraMoving(true);
             for (let k = 0; k < N; k++) {
               pose(k);
+              if (k > stopAt) {
+                // Parked, as the live loop parks: the ladder climbs on a
+                // frame time that always affords it.
+                R.setCameraMoving(false);
+                R.holdTick(5.0);
+              }
               await R.drawFrame(target.view, target.format, [W, H], viewAt(k),
                                 { deltaSeconds: dt });
               if (onFrame) await onFrame(k);
@@ -153,7 +164,9 @@ try {
 
           // The flight, with read-backs.
           const flown = [];
-          const scored = (k) => k > 0 && (k % EVERY === 0 || k === N - 1);
+          const scored = (k) => (path.stopAt
+            ? [1, 4, 8, 16, 32].includes(k - stopAt)
+            : k > 0 && (k % EVERY === 0 || k === N - 1));
           await fly(async (k) => {
             // A scored frame, and the one before it for the flicker score.
             if (scored(k) || scored(k + 1)) {
@@ -169,6 +182,8 @@ try {
 
           // The references: each read-back pose, parked, at scale 1.
           const flightScale = R.flightRenderScale;
+          const reprojectOn = R.reproject.on;
+          R.reproject.on = false;      // references are averaged in place
           R.setCameraMoving(false);
           R.setRenderScale(1.0);
           const out = [];
@@ -248,6 +263,7 @@ try {
                        ref: ${JSON.stringify(Boolean(saveDir))} ? await png(ref) : null });
           }
           R.setRenderScale(flightScale);
+          R.reproject.on = reprojectOn;
           return { msPerFrame, frames: out,
                    renderSize: [R._targets?.w, R._targets?.h] };
         } finally {
@@ -264,6 +280,11 @@ try {
           writeFileSync(join(saveDir, `${stem}-ref.png`), Buffer.from(f.ref, "base64"));
         }
         delete f.flight; delete f.ref;
+      }
+      if (PATHS[pathName].stopAt && !asJson) {
+        console.log(`${tier.padEnd(8)}${pathName.padEnd(8)}frames after the stop: ` +
+          r.frames.map((f) => `+${f.k - PATHS[pathName].stopAt} rmse ` +
+                              `${f.rmse.toFixed(2)} sharp ${f.sharp.toFixed(2)}`).join(" | "));
       }
       const row = { demo, tier, path: pathName, ms: +r.msPerFrame.toFixed(2),
                     rmse: +mean("rmse").toFixed(3), edge: +mean("edge").toFixed(3),
