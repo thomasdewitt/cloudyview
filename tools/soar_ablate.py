@@ -7,6 +7,7 @@ save, and whether a packed-clearance decode costs anything by itself.
         --tiers low,high --variants no_premarch,clearance_ctl --repeats 7
     uv run --extra dev python tools/soar_ablate.py --demo marine-congestus-coarse \\
         --scene city --variants uplight_const
+    uv run --extra dev python tools/soar_ablate.py --report a.jsonl b.jsonl
 
 Each variant is the module text with one patch (soar_variants.patch, which
 refuses an anchor that has moved); the tree's shader is not touched. None of
@@ -162,7 +163,7 @@ def city_views(level, tier_presets):
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--demo", required=True,
+    ap.add_argument("--demo", default=None,
                     help="a baked demo: a name under --demo-dir, or a directory")
     ap.add_argument("--demo-dir", default=None,
                     help="where the baked demos are (default web/soar/demos)")
@@ -181,8 +182,18 @@ def main():
                     help="factor on the raw timestamp differences, if this "
                          "backend's are known not to be nanoseconds")
     ap.add_argument("--out", default=None, help="JSON lines, appended")
+    ap.add_argument("--label", default="run",
+                    help="names this run in --out, for comparing runs")
+    ap.add_argument("--report", nargs="+", default=None, metavar="JSONL",
+                    help="instead of timing: join --out files of earlier "
+                         "runs into one table (markdown on stdout, or to --md)")
+    ap.add_argument("--md", default=None, help="with --report: write here")
     args = ap.parse_args()
+    if args.report:
+        return report(args.report, args.md)
 
+    if not args.demo:
+        ap.error("--demo is required (unless --report)")
     city = args.scene == "city"
     surface = "city" if city else "ocean"
     allowed = CITY_VARIANTS + ("no_premarch", "no_gradient", "ice_const",
@@ -252,7 +263,8 @@ def main():
             summ = {k: {m: sv.summarize(v[m]) for m in v} for k, v in res.items()}
             if out:
                 out.write(json.dumps(dict(
-                    kind="ablate", rev=rev, device=info.get("device"),
+                    kind="ablate", label=args.label, rev=rev,
+                    device=info.get("device"),
                     backend=info.get("backend_type"), demo=level.name,
                     scene=args.scene, tier=tier, view=name, size=list(size),
                     output=[out_w, out_h], look=look, frames=args.frames,
@@ -287,6 +299,66 @@ def main():
             for a in arms[1:]))
     if out:
         out.close()
+
+
+def report(paths, md_path=None):
+    """Per scene and tier, summed over every (demo, view): each variant's
+    change in march-pass time against stock, run by run, beside the A/A
+    control's. A difference is only worth reading where it is larger than
+    the control's in every run."""
+    from collections import defaultdict
+    recs = [json.loads(line) for p in paths for line in open(p)]
+    recs = [r for r in recs if r.get("kind") == "ablate"]
+    if not recs:
+        raise SystemExit("no ablate records in " + ", ".join(paths))
+    metric = "gpu_ms" if all(r["summary"]["stock"]["gpu_ms"]["min"] is not None
+                             for r in recs) else "wall_ms"
+    labels = list(dict.fromkeys(r.get("label", "run") for r in recs))
+    scene_arms = {}
+    for r in recs:
+        scene_arms.setdefault(r["scene"], list(r["summary"]))
+    sums = defaultdict(float)        # (scene, tier, label, arm) -> ms
+    spread = defaultdict(float)      # (scene, tier, label) -> worst in-run spread
+    demos = defaultdict(set)
+    for r in recs:
+        key = (r["scene"], r["tier"], r.get("label", "run"))
+        demos[(r["scene"], r["tier"])].add(r["demo"])
+        arms = scene_arms[r["scene"]]
+        if not all(a in r["summary"] for a in arms):
+            continue
+        for a in arms:
+            sums[key + (a,)] += r["summary"][a][metric]["min"]
+            spread[key] = max(spread[key], r["summary"][a][metric]["spread"] or 0)
+    order = {t: i for i, t in enumerate(sv.TIER_ORDER)}
+    keys = sorted({(r["scene"], r["tier"]) for r in recs},
+                  key=lambda k: (k[0], order[k[1]]))
+    lines = [f"Change in {'march-pass GPU time' if metric == 'gpu_ms' else 'wall clock'} "
+             "against stock, summed over every (demo, view) of the scene and "
+             "tier; one row per run. In-run spread: the worst (slowest - "
+             "fastest) / fastest of any arm and view in that run."]
+    last_scene = None
+    for scene, tier in keys:
+        arms = scene_arms[scene]
+        if scene != last_scene:
+            last_scene = scene
+            lines += ["", "| scene | tier | run | demos | stock ms | "
+                      + " | ".join(a for a in arms if a != "stock")
+                      + " | in-run spread |",
+                      "|" + "---|" * (len(arms) + 5)]
+        for lab in labels:
+            base = sums.get((scene, tier, lab, "stock"))
+            if not base:
+                continue
+            cells = " | ".join(
+                f"{100 * (sums[(scene, tier, lab, a)] / base - 1):+.1f}%"
+                for a in arms if a != "stock")
+            lines.append(f"| {scene} | {tier} | {lab} | "
+                         f"{','.join(sorted(demos[(scene, tier)]))} | {base:.2f} | "
+                         f"{cells} | {100 * spread[(scene, tier, lab)]:.0f}% |")
+    md = "\n".join(lines) + "\n"
+    if md_path:
+        Path(md_path).write_text(md)
+    print(md)
 
 
 if __name__ == "__main__":

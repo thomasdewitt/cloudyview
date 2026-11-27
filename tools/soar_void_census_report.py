@@ -14,6 +14,8 @@ from pathlib import Path
 
 TIER_ORDER = ("minimal", "low", "medium", "high", "max")
 ARMS = ("full", "zero", "nomarch", "nomarch_live", "oracle_px", "oracle_t16")
+# Arms only later runs carry (run3 on); a cell without one shows "–".
+LATE_ARMS = ("oracle_null",)
 
 
 def _load(paths):
@@ -51,12 +53,54 @@ def _tier_key(t):
     return TIER_ORDER.index(t)
 
 
-def timing_cells(timing):
-    """(demo, tier, view) -> {arm: {"gpu": fastest over all runs, "wall": ..,
-    "runs": {label: fastest gpu}, "spread_in_run": max over runs}}"""
+SPREAD_LIMIT = 0.10
+
+
+def arm_spread(r, arm):
+    """One arm's in-run GPU spread: (slowest - fastest) of its repeats after
+    the first, over the cell's fastest full time.
+
+    The first repeat is left out because it is often slow for the first arm
+    or two of a cell and only there (by 30-100% on some High views, the same
+    views in every run, repeats 2-5 within 0.5% of each other): the GPU
+    coming back up to clock after the host-side work between cells. It
+    never sets the fastest time, which is still taken over every repeat.
+    Read against the full arm, not the arm itself, because every derived
+    number is a difference read against full: a 3 us jitter on the 7 us
+    nomarch arm is 40% of that arm and 1% of the frame."""
+    xs = [x for x in r["samples"][arm]["gpu_ms"][1:] if x is not None]
+    full = r["summary"]["full"]["gpu_ms"]["min"]
+    if len(xs) < 2 or not full:
+        return 0.0
+    return (max(xs) - min(xs)) / full
+
+
+def cell_spread(r):
+    """The worst in-run GPU spread of any arm of one timing record."""
+    return max(arm_spread(r, a) for a in r["summary"])
+
+
+def timing_cells(timing, noisy=None):
+    """(demo, tier, view) -> {arm: {"gpu": fastest over the runs that count,
+    "wall": .., "runs": {label: fastest gpu}, "spread": worst in-run spread
+    of the runs that count}}.
+
+    A run counts for a cell when no arm's repeats in it spread by more than
+    SPREAD_LIMIT. A cell no run counts for is left out, and its key added
+    to `noisy`."""
+    by_cell = defaultdict(list)
+    for r in timing:
+        by_cell[(r["demo"], r["tier"], r["view"])].append(r)
+    keep = []
+    for key, rs in by_cell.items():
+        ok = [r for r in rs if cell_spread(r) <= SPREAD_LIMIT]
+        if ok:
+            keep += ok
+        elif noisy is not None:
+            noisy.append((key, min(cell_spread(r) for r in rs)))
     cells = defaultdict(lambda: defaultdict(lambda: {"gpu": None, "wall": None,
                                                     "runs": {}, "spread": 0.0}))
-    for r in timing:
+    for r in keep:
         key = (r["demo"], r["tier"], r["view"])
         for arm, s in r["summary"].items():
             c = cells[key][arm]
@@ -65,8 +109,43 @@ def timing_cells(timing):
             c["wall"] = w if c["wall"] is None else min(c["wall"], w)
             prev = c["runs"].get(r["label"])
             c["runs"][r["label"]] = g if prev is None else min(prev, g)
-            c["spread"] = max(c["spread"], s["gpu_ms"]["spread"] or 0.0)
+            c["spread"] = max(c["spread"], arm_spread(r, arm))
     return cells
+
+
+def null_split(cs):
+    """Over the cells of `cs` that carry oracle_null, read in the runs that
+    carry it: (what the clamp costs, what removing the steps saves, full),
+    in ms summed over those cells. oracle_null is the oracle patch clamping
+    nothing, so null - full is the clamp's own cost and null - px the saving
+    of the steps it removes. None when no cell carries the arm."""
+    cost = saves = full = 0.0
+    n = 0
+    for c in cs:
+        labels = list(c.get("oracle_null", {}).get("runs", {}))
+        if not labels:
+            continue
+        g = lambda a: min(c[a]["runs"][l] for l in labels)        # noqa: E731
+        cost += g("oracle_null") - g("full")
+        saves += g("oracle_null") - g("oracle_px")
+        full += g("full")
+        n += 1
+    return (cost, saves, full) if n else None
+
+
+def group_run_to_run(cs, arm="full"):
+    """Run-to-run difference of `arm`'s time summed over those cells of `cs`
+    that count in two runs or more, over the runs all of those count in:
+    (largest - smallest) / smallest. None with fewer than two such runs."""
+    common = None
+    cs = [c for c in cs if len(c[arm]["runs"]) >= 2]
+    for c in cs:
+        labels = set(c[arm]["runs"])
+        common = labels if common is None else common & labels
+    if not common or len(common) < 2:
+        return None
+    sums = [sum(c[arm]["runs"][l] for c in cs) for l in sorted(common)]
+    return (max(sums) - min(sums)) / min(sums)
 
 
 def run_to_run(c):
@@ -79,7 +158,13 @@ def run_to_run(c):
 def report_main(args):
     census, timing, placement, bench = _load(args.jsonl)
     lines = []
-    out = {"census": census, "timing": timing, "census_bench_look": bench,
+    # The JSON holds what the report derives; the records it reads are the
+    # .jsonl files themselves.
+    out = {"sources": [str(p) for p in args.jsonl],
+           "census": [{k: r[k] for k in ("demo", "tier", "view", "size", "look",
+                                         "stock", "zero", "oracle_px",
+                                         "oracle_t16") if k in r}
+                      for r in census],
            "placement": list(placement.values())}
 
     # ---- setup ----
@@ -212,19 +297,44 @@ def report_main(args):
         lines.append("")
 
     # ---- timing ----
-    cells = timing_cells(timing)
+    noisy = []
+    cells = timing_cells(timing, noisy)
+    out["timing_cells"] = [
+        {"demo": d, "tier": t, "view": v,
+         "arms": {a: {"gpu_ms": c[a]["gpu"], "wall_ms": c[a]["wall"],
+                      "runs": c[a]["runs"]} for a in c}}
+        for (d, t, v), c in cells.items()]
+    out["timing_left_out"] = [{"demo": d, "tier": t, "view": v, "best_spread": sp}
+                              for (d, t, v), sp in noisy]
+    if timing:
+        labels = list(dict.fromkeys(r["label"] for r in timing))
+        n_cells = len({(r["demo"], r["tier"], r["view"]) for r in timing})
+        lines += ["## Timing runs", "",
+                  f"Runs: {', '.join(labels)}. {n_cells} cells (demo, tier, "
+                  f"view). A run counts for a cell only if no arm's repeats "
+                  f"in it spread by more than {SPREAD_LIMIT:.0%} of the cell's "
+                  f"full time; "
+                  f"{len(noisy)} cells had no such run and are left out of "
+                  "every aggregate below"
+                  + (": " + "; ".join(f"{d}/{t}/{v} (best {sp:.0%})"
+                                      for (d, t, v), sp in noisy) if noisy else "")
+                  + ".", ""]
     if cells:
         cen = {(r["demo"], r["tier"], r["view"]): r for r in census}
         lines += ["## GPU time of the march pass, per demo and tier", "",
                   "Fastest over all repeats and runs, ms, mean over the views. "
                   "full = as is; zero = sigma 0 everywhere; nomarch = t_far = "
                   "t_near (foldable); live = the same behind a uniform; px / "
-                  "t16 = the oracle clamp. r2r = largest run-to-run difference "
-                  "of any arm in the group; in-run = largest spread of any arm "
-                  "within one run's repeats.", "",
+                  "t16 = the oracle clamp; null cost = what the clamp costs "
+                  "when it clamps nothing, and px steps = the saving of the "
+                  "steps the px clamp removes, both read against full in the "
+                  "runs that carry the null arm. r2r = run-to-run difference "
+                  "of the full arm's time summed over the group's views; "
+                  "in-run = largest spread of any arm "
+                  "within one run's repeats, as a share of the cell's full time.", "",
                   "| demo | tier | full | zero | nomarch | live | px | t16 | "
-                  "px saves | t16 saves | wall full | r2r | in-run |",
-                  "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+                  "px saves | t16 saves | null cost | px steps | wall full | r2r | in-run |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
         tg = defaultdict(list)
         for (d, t, v), c in cells.items():
             tg[(d, t)].append(c)
@@ -235,13 +345,16 @@ def report_main(args):
             full_sum = sum(c["full"]["gpu"] for c in cs)
             spx = 1 - sum(c["oracle_px"]["gpu"] for c in cs) / full_sum
             s16 = 1 - sum(c["oracle_t16"]["gpu"] for c in cs) / full_sum
-            r2r = max((run_to_run(c[a]) or 0) for c in cs for a in ARMS)
+            r2r = group_run_to_run(cs)
             inr = max(c[a]["spread"] for c in cs for a in ARMS)
+            ns = null_split(cs)
             lines.append(
                 f"| {d} | {t} | {_f(m['full'], 3)} | {_f(m['zero'], 3)} | "
                 f"{_f(m['nomarch'], 3)} | {_f(m['nomarch_live'], 3)} | "
                 f"{_f(m['oracle_px'], 3)} | {_f(m['oracle_t16'], 3)} | {_pct(spx)} | "
-                f"{_pct(s16)} | {_f(_mean([c['full']['wall'] for c in cs]), 2)} | "
+                f"{_pct(s16)} | {_pct(ns and ns[0] / ns[2])} | "
+                f"{_pct(ns and ns[1] / ns[2])} | "
+                f"{_f(_mean([c['full']['wall'] for c in cs]), 2)} | "
                 f"{_pct(r2r)} | {_pct(inr)} |")
         lines.append("")
 
@@ -251,11 +364,12 @@ def report_main(args):
                   "clear-air step (view march and pre-march) at the zero "
                   "field's cost per step, c = (zero - live) / (zero-field "
                   "steps), and is what a step count alone predicts; the oracle "
-                  "columns are measured.", "",
-                  "| tier | full ms | fixed | zero-field traversal | c (ns per "
+                  "columns are measured; null cost and px steps as in the "
+                  "table above.", "",
+                  "| tier | full ms | fixed | zero-field traversal | c (ps per "
                   "pixel-step) | void est. | of which lead | int | trail | pm void "
-                  "| px saves | t16 saves |",
-                  "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+                  "| px saves | t16 saves | null cost | px steps |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
         derived = {}
         for t in sorted({k[1] for k in cells}, key=_tier_key):
             keys = [k for k in cells if k[1] == t and k in cen]
@@ -275,17 +389,21 @@ def report_main(args):
             pmv = steps("stock", lambda s: s["premarch_before_first"]
                         + s["premarch_after_last"])
             void = (lead + inte + trail + pmv) * c
+            ns = null_split([cells[k] for k in keys])
             d = dict(full=full, fixed=live, zero_traversal=zero - live,
-                     c_ns=c * 1e6, void_est=void, lead=lead * c, interior=inte * c,
+                     c_ps=c * 1e9, void_est=void, lead=lead * c, interior=inte * c,
                      trail=trail * c, pm_void=pmv * c,
-                     px_saves=full - px, t16_saves=full - t16, views=len(keys))
+                     px_saves=full - px, t16_saves=full - t16, views=len(keys),
+                     null=None if ns is None else dict(
+                         clamp_cost=ns[0], px_step_saving=ns[1], full=ns[2]))
             derived[t] = d
             lines.append(
                 f"| {t} | {full:.2f} | {_pct(live / full)} | {_pct((zero - live) / full)} "
-                f"| {c * 1e6:.3f} | {_pct(void / full)} | {_pct(d['lead'] / full)} | "
+                f"| {c * 1e9:.2f} | {_pct(void / full)} | {_pct(d['lead'] / full)} | "
                 f"{_pct(d['interior'] / full)} | {_pct(d['trail'] / full)} | "
                 f"{_pct(d['pm_void'] / full)} | {_pct(d['px_saves'] / full)} | "
-                f"{_pct(d['t16_saves'] / full)} |")
+                f"{_pct(d['t16_saves'] / full)} | {_pct(ns and ns[0] / ns[2])} | "
+                f"{_pct(ns and ns[1] / ns[2])} |")
         lines.append("")
         out["derived_per_tier"] = derived
 
@@ -319,13 +437,13 @@ def per_view(census, cells, path):
             f"| {_f(r['oracle_px']['total'] + r['oracle_px']['premarch'])} "
             f"| {_f(r['oracle_t16']['total'] + r['oracle_t16']['premarch'])} |")
     lines += ["", "## GPU march-pass ms (fastest of all repeats and runs)", "",
-              "| demo | tier | view | " + " | ".join(ARMS)
+              "| demo | tier | view | " + " | ".join(ARMS + LATE_ARMS)
               + " | wall full | r2r max | in-run max |",
-              "|" + "---|" * (len(ARMS) + 6)]
+              "|" + "---|" * (len(ARMS + LATE_ARMS) + 6)]
     for (d, t, v), c in cells.items():
         r2r = max((run_to_run(c[a]) or 0) for a in ARMS)
         inr = max(c[a]["spread"] for a in ARMS)
         lines.append(f"| {d} | {t} | {v} | "
-                     + " | ".join(_f(c[a]["gpu"], 3) for a in ARMS)
+                     + " | ".join(_f(c[a]["gpu"], 3) for a in ARMS + LATE_ARMS)
                      + f" | {_f(c['full']['wall'], 2)} | {_pct(r2r)} | {_pct(inr)} |")
     path.write_text("\n".join(lines) + "\n")
