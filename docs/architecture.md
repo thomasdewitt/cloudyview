@@ -111,8 +111,9 @@ strengths; those are constants in the shader, next to the terms they scale.
 
 Step 3 has two forms. A still, a video frame and everything Python renders
 are averaged in place, on the grid they were marched on. The browser's live
-view can instead keep a **reprojected history** (`web/soar/reproject.js`,
-`?reproject=1`): an image at its own, finer size that follows the rays from
+view keeps a **reprojected history** instead (`web/soar/reproject.js`;
+`?reproject=0` goes back to averaging in place, with a blend at fixed
+screen positions while moving): an image at its own, finer size that follows the rays from
 one frame's camera to the next, so a moving view is an average too. For
 that, the march is compiled with `MOTION_GUIDE` and also returns, per pixel,
 the first two moments of inverse distance over what the pixel shows. The
@@ -147,7 +148,10 @@ and `witness --quality` renders the same thing from Python.
 | Low | 0.3 | 0.6 | 3 | 8 | cache | 15 km |
 | Minimal | 0.125 | 0.25 | 4 | 12 | cache | 8 km |
 
-The history scale applies with the reprojected history on.
+The history scale is the reprojected history's size as a fraction of the
+output's. Over the night city it is 1.0 at every tier. Max, and the city at
+Medium and above (whose steam is drawn after the accumulation), are still
+averaged in place.
 
 Thicker haze at the lower tiers is a performance setting as much as a look:
 in a periodic domain a ray ends where the air has absorbed it, so thicker

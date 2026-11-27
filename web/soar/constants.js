@@ -428,8 +428,12 @@ export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
 // While the camera moves, the picture is a history image that follows the
 // rays from frame to frame, in place of a blend at fixed screen positions.
 // Per tier: QUALITY_PRESETS[tier].historyScale, the history's size as a
-// fraction of the output's. It is never below the march's own scale.
-export const REPROJECT_DEFAULT = false;
+// fraction of the output's, and cityHistoryScale, the same over the night
+// city. It is never below the march's own scale. The city's is the whole
+// output at every tier: its picture is fine, hard-edged and nearly still,
+// which is what a history resolves best, and its frame costs so much more
+// than the resolve pass that the pass's size is not what a tier saves on.
+export const REPROJECT_DEFAULT = true;
 // The longest a history pixel is believed, in seconds, whatever is in it.
 // Most pixels of a moving view are held to less by their own depth spread
 // (REPROJECT_DRIFT_BUDGET_PX). The motion-smoothing slider sets it: its
@@ -557,7 +561,7 @@ export const LIGHT_CACHE_BAKE_SLICES_PER_FRAME = 8;
 export const QUALITY_PRESETS = {
   max: {
     name: "max", label: "Max",
-    renderScale: 1.0, historyScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
+    renderScale: 1.0, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
     sppPerFrame: 8, lightCache: false,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 32,
     haze: -0.0380,       // 70 km
@@ -567,7 +571,7 @@ export const QUALITY_PRESETS = {
   },
   high: {
     name: "high", label: "High",
-    renderScale: 1.0, historyScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
+    renderScale: 1.0, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
     sppPerFrame: 1, lightCache: true,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 32,
     haze: -0.0380,       // 70 km
@@ -577,7 +581,7 @@ export const QUALITY_PRESETS = {
   },
   medium: {
     name: "medium", label: "Medium",
-    renderScale: 0.70, historyScale: 1.0, stepFactor: 2.5, lightStepFactor: 4.0,
+    renderScale: 0.70, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.5, lightStepFactor: 4.0,
     sppPerFrame: 1, lightCache: true,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 24,
     haze: 0.4027,        // 25.2 km
@@ -587,7 +591,7 @@ export const QUALITY_PRESETS = {
   },
   low: {
     name: "low", label: "Low",
-    renderScale: 0.30, historyScale: 0.6, stepFactor: 3.0, lightStepFactor: 8.0,
+    renderScale: 0.30, historyScale: 0.6, cityHistoryScale: 1.0, stepFactor: 3.0, lightStepFactor: 8.0,
     sppPerFrame: 1, lightCache: true,
     holdRungs: [{ scale: 0.50, sampling: "low" }],
     holdRenderScale: 0.5, parkedFrames: 16,
@@ -603,7 +607,7 @@ export const QUALITY_PRESETS = {
   // in the startup toast, on exactly the machines a jokier name would insult.
   minimal: {
     name: "minimal", label: "Minimal",
-    renderScale: 0.125, historyScale: 0.25, stepFactor: 4.0, lightStepFactor: 12.0,
+    renderScale: 0.125, historyScale: 0.25, cityHistoryScale: 1.0, stepFactor: 4.0, lightStepFactor: 12.0,
     sppPerFrame: 1, lightCache: true,
     holdRungs: [{ scale: 0.25, sampling: "minimal" }],
     holdRenderScale: 0.25, parkedFrames: 8,

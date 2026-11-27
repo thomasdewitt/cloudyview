@@ -1355,8 +1355,10 @@ export class Renderer {
   historySize(outputSize, renderSize) {
     // Never below what a held view climbs to, so the history is one size
     // from flight to the top of the hold ladder.
+    const preset = K.QUALITY_PRESETS[this.qualityTier];
     const scale = this.historyScaleOverride
-      ?? Math.max(K.QUALITY_PRESETS[this.qualityTier].historyScale,
+      ?? Math.max(this.scene.city ? preset.cityHistoryScale
+                                  : preset.historyScale,
                   this._holdRenderScale);
     const size = renderTargetSize(outputSize, Math.min(1.0, scale));
     return [Math.max(size[0], renderSize[0]), Math.max(size[1], renderSize[1])];
