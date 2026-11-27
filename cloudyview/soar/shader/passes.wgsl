@@ -207,8 +207,15 @@ fn fs_steam_live(@builtin(position) frag_pos: vec4<f32>)
         -> @location(0) vec4<f32> {
     let xy = vec2<i32>(frag_pos.xy);
     let acc = textureLoad(surface_plain, xy, 0);
+    // The image may be finer than the march that traced the surface (a
+    // host's reprojected history): the surface's depth is then read at the
+    // march pixel under this one. With the two the same size that is this
+    // pixel, exactly.
+    let scale = vec2<f32>(textureDimensions(surface_buf, 0))
+        / vec2<f32>(textureDimensions(surface_plain, 0));
+    let sxy = vec2<i32>(frag_pos.xy * scale);
     return steam_live_city(camera_ray(frag_pos), acc,
-                           textureLoad(surface_buf, xy, 0).w);
+                           textureLoad(surface_buf, sxy, 0).w);
 }
 
 // One field-x plane of the light cache. The host renders this into a 2D

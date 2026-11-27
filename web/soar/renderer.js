@@ -288,7 +288,7 @@ export class Renderer {
     this.canvasFormat = canvasFormat;
     this.periodic = true;
     this.qualityTier = K.DEFAULT_QUALITY_TIER;
-    this._flightRenderScale = K.QUALITY_PRESETS[this.qualityTier].renderScale;
+    this._flightRenderScale = this._tierFlightScale(this.qualityTier);
     this._holdRenderScale = K.QUALITY_PRESETS[this.qualityTier].holdRenderScale;
     this._cameraMoving = false;
     this._holdLadder = null;
@@ -617,6 +617,8 @@ export class Renderer {
     // A nest attached or removed moves the NESTED specialization.
     this.prefetchPipelines();
     this.rayBindGroup = this._rayGroup("soar-raymarch", this.uniformBuf);
+    // The live steam's own group over the same textures, rebuilt on need.
+    this._steamRayGroup = null;
   }
 
   /**
@@ -664,11 +666,19 @@ export class Renderer {
 
   get flightRenderScale() { return this._flightRenderScale; }
 
+  /** The render scale `tier` flies at in this scene: its own, or over the
+   *  night city with the reprojected history on, its cityRenderScale. */
+  _tierFlightScale(tier) {
+    const preset = K.QUALITY_PRESETS[tier];
+    return this.scene.city && this.reproject.on
+      ? preset.cityRenderScale : preset.renderScale;
+  }
+
   get holdRenderScale() { return this._holdRenderScale; }
 
   get qualityIsCustom() {
     return this._flightRenderScale
-        !== K.QUALITY_PRESETS[this.qualityTier].renderScale
+        !== this._tierFlightScale(this.qualityTier)
       || this._holdRenderScale
         !== K.QUALITY_PRESETS[this.qualityTier].holdRenderScale;
   }
@@ -681,7 +691,7 @@ export class Renderer {
     this.qualityTier = tier;
     // Both scales come from the tier. A hand-set scale does not survive a
     // tier change, and never has — the tier is the coarser choice.
-    this._flightRenderScale = K.QUALITY_PRESETS[tier].renderScale;
+    this._flightRenderScale = this._tierFlightScale(tier);
     this._holdRenderScale = K.QUALITY_PRESETS[tier].holdRenderScale;
     this._applyEffectiveQuality();
     this.prefetchPipelines();
@@ -1387,7 +1397,7 @@ export class Renderer {
     const old = this._history;
     if (old && old.w === w && old.h === h) return old;
     if (old) {
-      const dead = [...old.color, ...old.aux];
+      const dead = [...old.color, ...old.aux, old.live].filter(Boolean);
       this.device.queue.onSubmittedWorkDone().then(() => {
         for (const tex of dead) tex.destroy();
       });
@@ -1638,10 +1648,10 @@ export class Renderer {
     // restart (see methodKey below).
     // The live view's frames go into the reprojected history, where that is
     // on, moving or parked; everything else (a capture, Max's several
-    // samples a frame, the live steam's picture) is averaged in place.
+    // samples a frame) is averaged in place.
     const samples = Math.max(1, this.sppPerFrame);
     const reprojected = this.reproject.on
-      && !this._offline && !steamLive && samples === 1;
+      && !this._offline && samples === 1;
     // The surfaces then filter over the history's pixel, not the march's.
     const filterFootprint = reprojected
       ? renderSize[0] / this.historySize(outputSize, renderSize)[0] : 1.0;
@@ -1747,9 +1757,15 @@ export class Renderer {
       // Only the last sample reaches the screen: the ones before it are the
       // picture being built, and presenting each would be a strobe.
       if (s === samples - 1) {
-        const shown = steamLive
-          ? this._encodeSteam(enc, targets, outTex, steamPipeline)
-          : outTex;
+        // The live steam goes over whichever image this frame built: the
+        // in-place average, on the march's grid, or the history, on its own.
+        let shown = outTex;
+        if (steamLive && reprojected) {
+          shown = this._encodeSteamOnHistory(enc, targets, plan.history, u,
+                                             steamPipeline);
+        } else if (steamLive) {
+          shown = this._encodeSteam(enc, targets, outTex, steamPipeline);
+        }
         const lensTex = this._encodeLensState(enc, lens, lensPipeline);
         this._encodeBlit(enc, shown, targetView, targetFormat,
                          shown.width === outputW && shown.height === outputH,
@@ -1764,6 +1780,7 @@ export class Renderer {
     }
     this._lastPresented = outTex;
     this._lastSteamLive = steamLive;
+    this._lastSteamOnHistory = steamLive && reprojected;
     return true;
   }
 
@@ -2180,6 +2197,62 @@ export class Renderer {
     return targets.live;
   }
 
+  /**
+   * The live steam over the reprojected history (see _encodeSteam), on the
+   * history's grid. The pass takes its rays from the uniform block's image
+   * size, which is the march's, so it is given a copy of the block with the
+   * history's size and no sub-pixel jitter: the steam is drawn along the
+   * ray through each history pixel's centre, to the surface depth of the
+   * march pixel under it (fs_steam_live). `u` is this frame's block;
+   * null redraws with the copy as it stands but for the scene clock
+   * (presentLast). Returns the history's live target.
+   */
+  _encodeSteamOnHistory(encoder, targets, history, u, pipeline,
+                        sceneClock = null) {
+    this._steamUniformBuf ??= this.device.createBuffer({
+      label: "soar-steam-uniforms", size: K.UNIFORM_NBYTES,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this._steamRayGroup ??= this._rayGroup("soar-steam", this._steamUniformBuf);
+    if (u) {
+      const su = this._steamUniforms ??= new Float32Array(u.length);
+      su.set(u);
+      su[SLOT.IMAGE_WIDTH] = history.w;
+      su[SLOT.IMAGE_WIDTH + 1] = history.h;
+      su[SLOT.SUBPIXEL_JITTER] = 0.0;
+      this.device.queue.writeBuffer(this._steamUniformBuf, 0, su);
+    } else {
+      this.device.queue.writeBuffer(
+        this._steamUniformBuf, SLOT.SCENE_CLOCK * 4,
+        new Float32Array([sceneClock]));
+    }
+    history.live ??= this.device.createTexture({
+      label: `soar-history-live-${history.w}x${history.h}`,
+      size: [history.w, history.h], format: ACCUM_FORMAT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+           | GPUTextureUsage.COPY_SRC,
+    });
+    const group = this.device.createBindGroup({
+      label: "soar-live-steam-history", layout: this.surfaceLayout, entries: [
+        { binding: 0, resource: targets.surface.view },
+        { binding: 1, resource: history.color[history.index].createView() },
+        { binding: 2, resource: this._veilDummy.createView() },
+      ],
+    });
+    const p = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: history.live.createView(), loadOp: "clear", storeOp: "store",
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+      }],
+    });
+    p.setPipeline(pipeline);
+    p.setBindGroup(0, this._steamRayGroup);
+    p.setBindGroup(1, group);
+    p.draw(3);
+    p.end();
+    return history.live;
+  }
+
   _encodeBlit(encoder, srcTex, targetView, targetFormat, exact,
               lensTex = this._lensDry) {
     const entries = [{ binding: 0, resource: srcTex.createView() },
@@ -2226,11 +2299,17 @@ export class Renderer {
       }
       if (pipeline && isPending(pipeline)) pipeline.catch(() => {});
       if (pipeline && !isPending(pipeline)) {
-        this.device.queue.writeBuffer(
-          this.uniformBuf, SLOT.SCENE_CLOCK * 4, new Float32Array(
-            [sceneClock(steam.sceneTime, this.scene.clockPeriod)]));
-        shown = this._encodeSteam(encoder, this._targets, this._lastPresented,
-                                  pipeline);
+        const clock = sceneClock(steam.sceneTime, this.scene.clockPeriod);
+        if (this._lastSteamOnHistory && this._history?.valid) {
+          shown = this._encodeSteamOnHistory(encoder, this._targets,
+                                             this._history, null, pipeline,
+                                             clock);
+        } else {
+          this.device.queue.writeBuffer(
+            this.uniformBuf, SLOT.SCENE_CLOCK * 4, new Float32Array([clock]));
+          shown = this._encodeSteam(encoder, this._targets,
+                                    this._lastPresented, pipeline);
+        }
       }
     }
     // Lens water keeps its own time on a converged view: step it here too,

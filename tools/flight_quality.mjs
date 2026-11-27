@@ -5,7 +5,7 @@
 //   node tools/flight_quality.mjs --web web [--cdp 9333] [--demo twpice|cyberpunk]
 //        [--tiers low,minimal] [--paths cruise,strafe,pan] [--size 1280x720]
 //        [--frames 90] [--every 15] [--fps 60] [--scale S] [--query "k=v&k=v"]
-//        [--set "renderer.prop=value;..."] [--save DIR] [--json]
+//        [--set "renderer.prop=value;..."] [--save DIR] [--film DIR] [--json]
 //
 // The live loop is held off (the viewer's capture flag) and drawFrame is
 // called once per scripted frame, as the loop would call it for a moving
@@ -31,6 +31,9 @@
 // --set assigns properties on the viewer (`window.soar`) after the tier is
 // chosen, for A/B without a code change: "renderer.motionBlendAlpha=0.3".
 // --save writes path-tier-NNN-{flight,ref}.png.
+// --film writes every flown frame as path-tier-NNN.jpg (no references, no
+// scores for them): what the flight looks like in motion, for ffmpeg or a
+// contact sheet. Trails and popping show there and not in a still.
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -54,6 +57,7 @@ const query = option("--query", "");
 const flightScale = option("--scale", null);
 const sets = option("--set", "");
 const saveDir = option("--save", null);
+const filmDir = option("--film", null);
 const asJson = argv.includes("--json");
 const REF_FRAMES = 48;
 if (!webDir) {
@@ -62,6 +66,7 @@ if (!webDir) {
   process.exit(2);
 }
 if (saveDir) mkdirSync(saveDir, { recursive: true });
+if (filmDir) mkdirSync(filmDir, { recursive: true });
 
 // Each path, from the demo's opening view: metres a second along the
 // camera's forward and right, and degrees a second of azimuth. `speed` is a
@@ -71,6 +76,8 @@ const PATHS = {
   strafe: { forward: 0.0, right: 1.0, yaw: 0.0 },
   pan: { forward: 0.3, right: 0.0, yaw: 25.0 },
   turn: { forward: 0.0, right: 0.0, yaw: 25.0 },
+  // A fast look-around while cruising: 90 degrees a second.
+  whip: { forward: 1.0, right: 0.0, yaw: 90.0 },
   still: { forward: 0.0, right: 0.0, yaw: 0.0 },
   // A cruise that stops dead at frame `stopAt` and holds, with the hold
   // ladder running as the live loop runs it. Scored 1, 4, 8, 16 and 32
@@ -125,16 +132,24 @@ try {
         const readback = new cap.Readback(s.device, [W, H]);
         const R = s.renderer;
         try {
+          // --set is applied on both sides of the tier choice: before it,
+          // for what the tier's own setup reads (whether the reprojected
+          // history is on decides the city's render scale), and after, for
+          // what that setup writes (the history's lifetime).
+          const applySets = () => {
+            for (const kv of ${JSON.stringify(sets)}.split(";").filter(Boolean)) {
+              const [key, value] = kv.split("=");
+              const parts = key.trim().split(".");
+              let obj = s;
+              for (const p of parts.slice(0, -1)) obj = obj[p];
+              obj[parts.at(-1)] = JSON.parse(value);
+            }
+          };
+          applySets();
           s.setQualityTier(${JSON.stringify(tier)});
+          applySets();
           if (${JSON.stringify(flightScale)} !== null) {
             s.setRenderScale(Number(${JSON.stringify(flightScale)}));
-          }
-          for (const kv of ${JSON.stringify(sets)}.split(";").filter(Boolean)) {
-            const [key, value] = kv.split("=");
-            const parts = key.trim().split(".");
-            let obj = s;
-            for (const p of parts.slice(0, -1)) obj = obj[p];
-            obj[parts.at(-1)] = JSON.parse(value);
           }
           await new Promise((ok) => setTimeout(ok, 50));
           while ((R._pendingPipelines?.size ?? 0) > 0 || R.lightBakePending) {
@@ -184,14 +199,30 @@ try {
 
           // The flight, with read-backs.
           const flown = [];
+          const film = [];
+          const jpeg = async (px) => {
+            const canvas = new OffscreenCanvas(W, H);
+            canvas.getContext("2d").putImageData(
+              new ImageData(new Uint8ClampedArray(px), W, H), 0, 0);
+            const blob = await canvas.convertToBlob(
+              { type: "image/jpeg", quality: 0.93 });
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            let bin = "";
+            for (let i = 0; i < bytes.length; i += 0x8000) {
+              bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+            }
+            return btoa(bin);
+          };
           const scored = (k) => (path.stopAt
             ? [1, 4, 8, 16, 32].includes(k - stopAt)
             : k > 0 && (k % EVERY === 0 || k === N - 1));
           await fly(async (k) => {
             // A scored frame, and the one before it for the flicker score.
-            if (scored(k) || scored(k + 1)) {
-              flown.push({ k, px: await grab(), scored: scored(k) });
-            }
+            const wanted = scored(k) || scored(k + 1);
+            if (!wanted && !${JSON.stringify(Boolean(filmDir))}) return;
+            const px = await grab();
+            if (wanted) flown.push({ k, px, scored: scored(k) });
+            if (${JSON.stringify(Boolean(filmDir))}) film.push(await jpeg(px));
           });
           // The flight again, timed: no read-backs, one fence at the end.
           await s.device.queue.onSubmittedWorkDone();
@@ -284,7 +315,7 @@ try {
           }
           R.setRenderScale(flightScale);
           R.reproject.on = reprojectOn;
-          return { msPerFrame, frames: out,
+          return { msPerFrame, frames: out, film,
                    renderSize: [R._targets?.w, R._targets?.h] };
         } finally {
           readback.destroy();
@@ -292,6 +323,9 @@ try {
           s._capturing = false;
         }
       })()`);
+      r.film.forEach((b64, k) => writeFileSync(
+        join(filmDir, `${pathName}-${tier}-${String(k).padStart(3, "0")}.jpg`),
+        Buffer.from(b64, "base64")));
       const mean = (key) => r.frames.reduce((a, f) => a + f[key], 0) / r.frames.length;
       for (const f of r.frames) {
         if (saveDir) {

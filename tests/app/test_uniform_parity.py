@@ -335,6 +335,7 @@ def test_the_shader_struct_is_the_block_both_hosts_pack():
         "CAM_ORIGIN": slots["cam_origin"], "CAM_FORWARD": slots["cam_forward"],
         "FRAME_INDEX": slots["frame_index"], "DT_LIGHT": slots["dt_light"],
         "NEST_DT_LIGHT": slots["nest_dt_light"],
+        "IMAGE_WIDTH": slots["image_width"],
         "SCENE_CLOCK": slots["scene_clock"], "LENS_DT": slots["lens_dt"],
         "SUBPIXEL_JITTER": slots["subpixel_jitter"],
         "JITTER_SCALE": slots["jitter_scale"],

@@ -149,9 +149,16 @@ and `witness --quality` renders the same thing from Python.
 | Minimal | 0.125 | 0.25 | 4 | 12 | cache | 8 km |
 
 The history scale is the reprojected history's size as a fraction of the
-output's. Over the night city it is 1.0 at every tier. Max, and the city at
-Medium and above (whose steam is drawn after the accumulation), are still
-averaged in place.
+output's. Max is still averaged in place.
+
+Over the night city the history is the whole output (half of it at
+Minimal), and the tiers fly at their own render scales: High 0.7, Medium
+0.5, Low 0.2, Minimal 0.125. The city's frame is its three surface passes,
+whose cost goes with the pixels marched, and its picture is the kind a
+history resolves best, so it marches fewer pixels than the day scene for a
+picture that is closer to the converged one than a full-size march without
+the history was. Where the steam is drawn after the accumulation (Medium
+and above) it is drawn over the history, on the history's grid.
 
 Thicker haze at the lower tiers is a performance setting as much as a look:
 in a periodic domain a ray ends where the air has absorbed it, so thicker

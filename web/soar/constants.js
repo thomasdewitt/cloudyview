@@ -430,9 +430,11 @@ export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
 // Per tier: QUALITY_PRESETS[tier].historyScale, the history's size as a
 // fraction of the output's, and cityHistoryScale, the same over the night
 // city. It is never below the march's own scale. The city's is the whole
-// output at every tier: its picture is fine, hard-edged and nearly still,
-// which is what a history resolves best, and its frame costs so much more
-// than the resolve pass that the pass's size is not what a tier saves on.
+// output at every tier but Minimal: its picture is fine, hard-edged and
+// nearly still, which is what a history resolves best, and its frame costs
+// so much more than the resolve pass that the pass's size is not what a tier
+// saves on. Minimal's is half: there the pass is a visible share of a frame
+// that has little to spare.
 export const REPROJECT_DEFAULT = true;
 // The longest a history pixel is believed, in seconds, whatever is in it.
 // Most pixels of a moving view are held to less by their own depth spread
@@ -556,6 +558,23 @@ export const LIGHT_CACHE_BAKE_SLICES_PER_FRAME = 8;
 // look defaults, with the top hold rung's sampling (High's step factors),
 // never the flight stepping below. See Renderer.beginOffline.
 //
+// `cityRenderScale` is the flight render scale over the night city, where
+// the reprojected history is on (without it the city flies at renderScale).
+// The city's frame is its three surface passes, whose cost goes with the
+// pixels marched, and its history is the whole output at every tier, so it
+// can march far fewer pixels than the day scene for the same picture.
+// Measured (tools/flight_quality.mjs --demo cyberpunk, RMS error in flight
+// against the converged picture, cruise / strafe / pan, and ms a frame on an
+// RTX 5080 at 1920x1080):
+//   High    as before (1.0, no history)  9.1 / 10.5 / 13.8   19.6 ms
+//           0.7 with the history         8.8 /  8.1 /  7.4   11.5 ms
+//   Medium  as before (0.7)             10.7 / 12.0 / 14.7   10.9 ms
+//           0.5 with the history         9.8 /  9.2 /  8.4    6.6 ms
+// and at 2560x1440:
+//   Low     as before (0.3)             16.7 / 17.6 / 19.4    5.0 ms
+//           0.2 with the history        15.1 / 14.8 / 13.0    3.4 ms
+// A parked view still climbs to the tier's hold scale.
+//
 // `aheadMarch` is whether the tier runs the forward pre-march (the optical
 // depth still ahead on each sightline; clouds.wgsl premarch_tau_ahead). It
 // is part of the lighting method, so it holds parked and in captures too.
@@ -568,7 +587,7 @@ export const LIGHT_CACHE_BAKE_SLICES_PER_FRAME = 8;
 export const QUALITY_PRESETS = {
   max: {
     name: "max", label: "Max",
-    renderScale: 1.0, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
+    renderScale: 1.0, cityRenderScale: 1.0, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
     sppPerFrame: 8, lightCache: false, aheadMarch: true,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 32,
     haze: -0.0380,       // 70 km
@@ -578,7 +597,7 @@ export const QUALITY_PRESETS = {
   },
   high: {
     name: "high", label: "High",
-    renderScale: 1.0, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
+    renderScale: 1.0, cityRenderScale: 0.7, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
     sppPerFrame: 1, lightCache: true, aheadMarch: true,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 32,
     haze: -0.0380,       // 70 km
@@ -588,7 +607,7 @@ export const QUALITY_PRESETS = {
   },
   medium: {
     name: "medium", label: "Medium",
-    renderScale: 0.70, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.5, lightStepFactor: 4.0,
+    renderScale: 0.70, cityRenderScale: 0.5, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.5, lightStepFactor: 4.0,
     sppPerFrame: 1, lightCache: true, aheadMarch: true,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 24,
     haze: 0.4027,        // 25.2 km
@@ -598,7 +617,7 @@ export const QUALITY_PRESETS = {
   },
   low: {
     name: "low", label: "Low",
-    renderScale: 0.30, historyScale: 0.6, cityHistoryScale: 1.0, stepFactor: 3.0, lightStepFactor: 8.0,
+    renderScale: 0.30, cityRenderScale: 0.2, historyScale: 0.6, cityHistoryScale: 1.0, stepFactor: 3.0, lightStepFactor: 8.0,
     sppPerFrame: 1, lightCache: true, aheadMarch: false,
     holdRungs: [{ scale: 0.50, sampling: "low" }],
     holdRenderScale: 0.5, parkedFrames: 16,
@@ -614,7 +633,7 @@ export const QUALITY_PRESETS = {
   // in the startup toast, on exactly the machines a jokier name would insult.
   minimal: {
     name: "minimal", label: "Minimal",
-    renderScale: 0.125, historyScale: 0.25, cityHistoryScale: 1.0, stepFactor: 4.0, lightStepFactor: 12.0,
+    renderScale: 0.125, cityRenderScale: 0.125, historyScale: 0.25, cityHistoryScale: 0.5, stepFactor: 4.0, lightStepFactor: 12.0,
     sppPerFrame: 1, lightCache: true, aheadMarch: false,
     holdRungs: [{ scale: 0.25, sampling: "minimal" }],
     holdRenderScale: 0.25, parkedFrames: 8,
