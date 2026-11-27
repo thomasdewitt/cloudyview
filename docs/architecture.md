@@ -74,7 +74,7 @@ exactly one surface. A new surface is a set of files, an `absent` file with
 neutral bodies for whatever shared code calls, and an entry in the manifest.
 
 The host puts a header of compile-time switches in front:
-`PERIODIC_DOMAIN`, `NESTED`, `TONE_MAP`, `LIGHT_CACHE`. They are
+`PERIODIC_DOMAIN`, `NESTED`, `TONE_MAP`, `LIGHT_CACHE`, `MOTION_GUIDE`. They are
 constants so that the branch not taken costs nothing. `shader.py` and
 `web/soar/shader.js` build the module the same way, and
 `tests/app/test_uniform_parity.py` checks they produce the same string.
@@ -109,6 +109,21 @@ strengths; those are constants in the shader, next to the terms they scale.
 4. **Present**: the average, with lens water and the overlays (minimap,
    the bird or paper plane), goes to the screen.
 
+Step 3 has two forms. A still, a video frame and everything Python renders
+are averaged in place, on the grid they were marched on. The browser's live
+view can instead keep a **reprojected history** (`web/soar/reproject.js`,
+`?reproject=1`): an image at its own, finer size that follows the rays from
+one frame's camera to the next, so a moving view is an average too. For
+that, the march is compiled with `MOTION_GUIDE` and also returns, per pixel,
+the first two moments of inverse distance over what the pixel shows. The
+mean says where the pixel's content was a frame ago. The variance says how
+badly one motion fits a pixel made of cloud at several depths, and the
+history is kept only as long as that misfit stays small: indefinitely under
+a turn, a few frames beside a near cloud edge at speed. Each march sample is
+blended in where its jittered ray landed, which is how a march at 0.3 of the
+output's size fills a grid at 0.6 over a few frames. A parked view runs the
+same pass with the two cameras equal.
+
 The optical depth toward the sun is the expensive part. It is either marched
 per sample (`light_march_tau`) or read from the **light cache**: a 3D
 texture at half the field's resolution, baked for the current sun by
@@ -124,13 +139,15 @@ and `witness --quality` renders the same thing from Python.
 
 ### The tiers
 
-| | render scale in flight | view step (voxels) | light step (voxels) | sun | haze e-folding |
-|---|---|---|---|---|---|
-| Max | 1.0, 8 samples a frame | 2 | 2 | marched | 70 km |
-| High | 1.0 | 2 | 2 | cache | 70 km |
-| Medium | 0.7 | 2.5 | 4 | cache | 25 km |
-| Low | 0.3 | 3 | 8 | cache | 15 km |
-| Minimal | 0.125 | 4 | 12 | cache | 8 km |
+| | render scale in flight | history scale | view step (voxels) | light step (voxels) | sun | haze e-folding |
+|---|---|---|---|---|---|---|
+| Max | 1.0, 8 samples a frame | (in place) | 2 | 2 | marched | 70 km |
+| High | 1.0 | 1.0 | 2 | 2 | cache | 70 km |
+| Medium | 0.7 | 1.0 | 2.5 | 4 | cache | 25 km |
+| Low | 0.3 | 0.6 | 3 | 8 | cache | 15 km |
+| Minimal | 0.125 | 0.25 | 4 | 12 | cache | 8 km |
+
+The history scale applies with the reprojected history on.
 
 Thicker haze at the lower tiers is a performance setting as much as a look:
 in a periodic domain a ray ends where the air has absorbed it, so thicker
@@ -184,6 +201,10 @@ commands it prints.
   `tools/tint_check.mjs` compiles every module with Chrome's WGSL compiler,
   which is stricter than the one Python uses; `tools/pinned_still.mjs`
   renders stills with every input pinned and hashes them.
+- `tools/flight_quality.mjs` flies a scripted path through the browser's
+  renderer and scores frames against the picture the same tier converges to
+  at each pose. It is how a change to what a moving view looks like is
+  measured.
 - `tests/reference_images/` holds eight reference views of the witness
   renderer. They guard the look; they are re-baked deliberately when the
   look is meant to change (`tests/generate_references.py`).

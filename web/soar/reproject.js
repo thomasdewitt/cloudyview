@@ -87,7 +87,9 @@ struct ResolveUniforms {
     px_per_rad: f32,
     // The most weight (samples) the history is carried in at.
     count_cap: f32,
-    pad1: f32,
+    // 1.0 reads the history's colour through the Catmull-Rom kernel, 0.0
+    // bilinearly.
+    sharp_history: f32,
     pad2: f32,
 };
 @group(0) @binding(0) var<uniform> ru: ResolveUniforms;
@@ -227,7 +229,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> ResolveOut {
     // resampled every frame, and a bilinear read would low-pass it each
     // time until nothing finer than a few pixels was left. The kernel's
     // overshoot is taken off by the clamp below. The weight is read
-    // bilinearly; it has nothing fine to keep.
+    // bilinearly; it has nothing fine to keep. (sharp_history off reads the
+    // colour bilinearly too: four loads for sixteen, and a softer picture.)
     var hist = vec4<f32>(0.0);
     var count = 0.0;
     if (valid) {
@@ -241,16 +244,24 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> ResolveOut {
         let w10 = f.x * (1.0 - f.y);
         let w01 = (1.0 - f.x) * f.y;
         let w11 = f.x * f.y;
-        let wx = catmull_rom(f.x);
-        let wy = catmull_rom(f.y);
-        for (var j: i32 = 0; j < 4; j = j + 1) {
-            var row = vec4<f32>(0.0);
-            let y = clamp(i32(base.y) + j - 1, 0, hmax.y);
-            for (var i: i32 = 0; i < 4; i = i + 1) {
-                let x = clamp(i32(base.x) + i - 1, 0, hmax.x);
-                row = row + wx[i] * textureLoad(hist_color, vec2<i32>(x, y), 0);
+        if (ru.sharp_history > 0.5) {
+            let wx = catmull_rom(f.x);
+            let wy = catmull_rom(f.y);
+            for (var j: i32 = 0; j < 4; j = j + 1) {
+                var row = vec4<f32>(0.0);
+                let y = clamp(i32(base.y) + j - 1, 0, hmax.y);
+                for (var i: i32 = 0; i < 4; i = i + 1) {
+                    let x = clamp(i32(base.x) + i - 1, 0, hmax.x);
+                    row = row + wx[i]
+                        * textureLoad(hist_color, vec2<i32>(x, y), 0);
+                }
+                hist = hist + wy[j] * row;
             }
-            hist = hist + wy[j] * row;
+        } else {
+            hist = w00 * textureLoad(hist_color, vec2<i32>(i0.x, i0.y), 0)
+                 + w10 * textureLoad(hist_color, vec2<i32>(i1.x, i0.y), 0)
+                 + w01 * textureLoad(hist_color, vec2<i32>(i0.x, i1.y), 0)
+                 + w11 * textureLoad(hist_color, vec2<i32>(i1.x, i1.y), 0);
         }
         count = w00 * textureLoad(hist_aux, vec2<i32>(i0.x, i0.y), 0).y
               + w10 * textureLoad(hist_aux, vec2<i32>(i1.x, i0.y), 0).y
@@ -336,6 +347,7 @@ export function defaultReprojection() {
     clampGamma: K.REPROJECT_CLAMP_GAMMA,
     fillWeight: K.REPROJECT_FILL_WEIGHT,
     jitterScale: K.REPROJECT_JITTER_SCALE,
+    sharpHistory: K.REPROJECT_SHARP_HISTORY,
   };
 }
 
@@ -374,7 +386,7 @@ export function packResolveUniforms(out, u, prev, deltaM, {
   out[39] = subpixel ? 1.0 : 0.0;
   out[40] = historySize[0] / (2.0 * u[3]);
   out[41] = countCap;
-  out[42] = 0.0;
+  out[42] = params.sharpHistory ? 1.0 : 0.0;
   out[43] = 0.0;
   return out;
 }

@@ -446,6 +446,9 @@ export const REPROJECT_CLAMP_GAMMA = 1.5;
 // The least weight, in samples, of this frame's soft estimate of a pixel
 // (the fill; reproject.js adds to it where the history is short-lived).
 export const REPROJECT_FILL_WEIGHT = 0.02;
+// Whether the history's colour is read through a Catmull-Rom kernel
+// (sixteen texture loads a history pixel) or bilinearly (four, and softer).
+export const REPROJECT_SHARP_HISTORY = true;
 // A change of the scene under a still camera (the exposure gliding, a haze
 // slider) keeps the history's place and not its content: the history then
 // lives this many frames.

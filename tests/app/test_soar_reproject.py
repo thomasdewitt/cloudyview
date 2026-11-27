@@ -58,7 +58,7 @@ _JS = textwrap.dedent("""
         frameIndex: 7, jitterScale: 0.5, subpixel: true, historyValid: true,
         lifeFrames: 30, renderSize: [300, 200], historySize: [600, 400],
         params: { splatSigma: 0.25, clampGamma: 1.5, driftBudgetPx: 2.0,
-                  fillWeight: 0.125 },
+                  fillWeight: 0.125, sharpHistory: true },
         countCap: 3,
       });
     out.packed = Array.from(packed);
@@ -125,6 +125,7 @@ def test_every_field_is_packed_where_the_struct_reads_it(host):
     # History pixels per radian at the centre: width / (2 tan(fov / 2)).
     assert at["px_per_rad"] == pytest.approx([600 / (2 * 3)])
     assert at["count_cap"] == [3]
+    assert at["sharp_history"] == [1.0]
 
 
 def test_the_guide_unit_is_the_marchs(host):
