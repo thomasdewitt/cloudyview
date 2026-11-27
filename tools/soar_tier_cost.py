@@ -43,7 +43,12 @@ sizes assumed to hold all the way down. It assumes the second size still
 fills the GPU; where it does not, part of the penalty is fill, and the
 estimate over-corrects (makes the small tiers dearer than they are).
 
-The report gives, for each step up (low/minimal, medium/low, high/medium),
+Max is timed as one march per frame, which is what this host's frames are
+(the browser's Max today presents eight per frame, sppPerFrame; --tiers
+high,max times the single-sample Max beside High).
+
+The report gives, for each step up (low/minimal, medium/low, high/medium,
+max/high),
 the ratio per view and per demo (summed over the demo's views), and their
 mean, median and maximum. The gate in escalateQualityTier has to hold on
 the worst field and view, so the maximum is the number that sets it.
@@ -63,7 +68,7 @@ from soar_void_census import nomarch_patch                    # noqa: E402
 
 DEMOS = ("twpice,congestus,dycoms,rce,stratified,rce-dales,rce-sam,"
          "marine-congestus-coarse,utah-convection-coarse")
-STEPS = (("minimal", "low"), ("low", "medium"), ("medium", "high"))
+STEPS = (("minimal", "low"), ("low", "medium"), ("medium", "high"), ("high", "max"))
 SPREAD_LIMIT = 0.10
 
 
