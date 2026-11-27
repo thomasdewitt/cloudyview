@@ -812,9 +812,32 @@ export const AUTO_TIER_TARGET_MS = 1000.0 / 30.0;
 // without its own completed measurement. The catastrophic case — submitting a
 // High frame on an M1 having measured nothing — is prevented by the walk
 // being strictly one rung at a time, not by the accuracy of these ratios.
+//
+// Remeasured 2026-11-27 (benchmarking/2026-11-27-void-census/tier_cost.md:
+// nine fields, ten views each, every tier flown with its own haze and LOD,
+// the march pass by GPU timestamps). As flown on the 5080, mean and worst
+// field: minimal -> low 3.7 and 4.9, low -> medium 5.7 and 6.3, medium ->
+// high 2.6 and 3.7. Two things in that:
+//
+//   - Low -> medium rose from 4.9 to 5.7 when Low and Minimal stopped
+//     running the forward pre-march (aheadMarch), which made Low cheaper
+//     and left Medium alone. `low` is raised by that factor, so the gate
+//     decides as it did before.
+//   - The ratios a slower GPU sees are larger than these constants, and
+//     were before: with the GPU full, the same looks cost about 6 to 8
+//     times from Minimal to Low and from Low to Medium (the 5080 does not
+//     fill at their render sizes). The constants were never the true ratio
+//     there; with the 0.75 margin they have been the working gate on the
+//     machines it was tuned on, and what a machine measures also carries
+//     fixed costs the ratio does not multiply. They are left as that, not
+//     raised to the measured 6-8, which would hold machines a tier lower
+//     than they fly today. What it means for the ordering rule above: a
+//     climb can land on a tier up to about twice its predicted cost, which
+//     is a sluggish settle the governor then corrects, and not a frozen
+//     machine.
 export const AUTO_TIER_COST_RATIO_TO_NEXT = {
   minimal: 4.0,
-  low: 4.0,
+  low: 4.6,
   medium: 3.0,
 };
 export const AUTO_TIER_MARGIN = 0.75;
