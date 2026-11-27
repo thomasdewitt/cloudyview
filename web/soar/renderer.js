@@ -962,6 +962,10 @@ export class Renderer {
       toneMap,
       surface: this.scene.city ? "city" : "ocean",
       lightCache: lighting.lightCache,
+      // The tier's, for a method that does not say (the bake's, the
+      // meter's).
+      aheadMarch: lighting.aheadMarch
+        ?? K.QUALITY_PRESETS[this.qualityTier].aheadMarch,
       // With reprojection on, every march of the picture writes the guide,
       // parked or flying, so a session compiles one march and not two.
       motionGuide,
@@ -1657,7 +1661,7 @@ export class Renderer {
     // ~42% ghost of the old one for a frame before the average restarted.
     // In flight the key changes every frame anyway, and the motion blend is
     // the point, so a moving camera is left to it.
-    const methodKey = `${lighting.lightCache}`;
+    const methodKey = `${lighting.lightCache}|${lighting.aheadMarch}`;
     if (this._accumMethod !== undefined && methodKey !== this._accumMethod
         && !this._cameraMoving) {
       this._resetAccumulation();
@@ -2296,7 +2300,8 @@ export class Renderer {
     const wanted = this.lightCacheMode === "auto"
       ? preset.lightCache
       : this.lightCacheMode === "on";
-    return { lightCache: Boolean(wanted && cacheReady) };
+    return { lightCache: Boolean(wanted && cacheReady),
+             aheadMarch: preset.aheadMarch };
   }
 
   invalidateLightCache() {

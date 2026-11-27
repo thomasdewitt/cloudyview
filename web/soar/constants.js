@@ -556,13 +556,20 @@ export const LIGHT_CACHE_BAKE_SLICES_PER_FRAME = 8;
 // look defaults, with the top hold rung's sampling (High's step factors),
 // never the flight stepping below. See Renderer.beginOffline.
 //
+// `aheadMarch` is whether the tier runs the forward pre-march (the optical
+// depth still ahead on each sightline; clouds.wgsl premarch_tau_ahead). It
+// is part of the lighting method, so it holds parked and in captures too.
+// Low and Minimal leave it out: measured (tools/soar_menu.py), it was 27-31%
+// of their march-pass time and moved their converged picture by 0.15-0.26 of
+// 255 RMS, under their own sampling grain.
+//
 // `haze` is the aerosol coordinate; the comment gives its sea-level
 // e-folding length.
 export const QUALITY_PRESETS = {
   max: {
     name: "max", label: "Max",
     renderScale: 1.0, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
-    sppPerFrame: 8, lightCache: false,
+    sppPerFrame: 8, lightCache: false, aheadMarch: true,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 32,
     haze: -0.0380,       // 70 km
     lodStrength: 0.5, autoExposure: true,
@@ -572,7 +579,7 @@ export const QUALITY_PRESETS = {
   high: {
     name: "high", label: "High",
     renderScale: 1.0, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.0, lightStepFactor: 2.0,
-    sppPerFrame: 1, lightCache: true,
+    sppPerFrame: 1, lightCache: true, aheadMarch: true,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 32,
     haze: -0.0380,       // 70 km
     lodStrength: 0.5, autoExposure: true,
@@ -582,7 +589,7 @@ export const QUALITY_PRESETS = {
   medium: {
     name: "medium", label: "Medium",
     renderScale: 0.70, historyScale: 1.0, cityHistoryScale: 1.0, stepFactor: 2.5, lightStepFactor: 4.0,
-    sppPerFrame: 1, lightCache: true,
+    sppPerFrame: 1, lightCache: true, aheadMarch: true,
     holdRungs: [], holdRenderScale: 1.0, parkedFrames: 24,
     haze: 0.4027,        // 25.2 km
     lodStrength: 1.05, autoExposure: true,
@@ -592,7 +599,7 @@ export const QUALITY_PRESETS = {
   low: {
     name: "low", label: "Low",
     renderScale: 0.30, historyScale: 0.6, cityHistoryScale: 1.0, stepFactor: 3.0, lightStepFactor: 8.0,
-    sppPerFrame: 1, lightCache: true,
+    sppPerFrame: 1, lightCache: true, aheadMarch: false,
     holdRungs: [{ scale: 0.50, sampling: "low" }],
     holdRenderScale: 0.5, parkedFrames: 16,
     haze: 0.6590,        // 15 km
@@ -608,7 +615,7 @@ export const QUALITY_PRESETS = {
   minimal: {
     name: "minimal", label: "Minimal",
     renderScale: 0.125, historyScale: 0.25, cityHistoryScale: 1.0, stepFactor: 4.0, lightStepFactor: 12.0,
-    sppPerFrame: 1, lightCache: true,
+    sppPerFrame: 1, lightCache: true, aheadMarch: false,
     holdRungs: [{ scale: 0.25, sampling: "minimal" }],
     holdRenderScale: 0.25, parkedFrames: 8,
     haze: 1.0905,        // 8 km

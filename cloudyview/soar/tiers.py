@@ -12,6 +12,10 @@ the two together.
 #   step_factor, light_step_factor   march steps, in units of the smallest voxel
 #   light_cache   read the sun's optical depth from the baked light cache
 #                 instead of marching to the sun at every cloud sample
+#   ahead_march   run the forward pre-march (the optical depth still ahead
+#                 on each sightline, which opens the deep-shadow fill toward
+#                 a cloud's far edge). Low and Minimal leave it out: it was
+#                 27-31% of their march for under one display level
 #   accumulate    passes averaged into the image (the browser's parkedFrames)
 #   city_roof_density   the night city's roof clutter: a factor on the
 #                 probability of each clutter slot on a roof (tanks,
@@ -20,19 +24,19 @@ the two together.
 #                 tuned at; the higher tiers can afford more.
 QUALITY_PRESETS = {
     "max":     {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": False, "accumulate": 32,
+                "light_cache": False, "ahead_march": True,  "accumulate": 32,
                 "city_roof_density": 1.4},
     "high":    {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True,  "accumulate": 32,
+                "light_cache": True, "ahead_march": True,   "accumulate": 32,
                 "city_roof_density": 1.4},
     "medium":  {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True,  "accumulate": 24,
+                "light_cache": True, "ahead_march": True,   "accumulate": 24,
                 "city_roof_density": 1.2},
     "low":     {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True,  "accumulate": 16,
+                "light_cache": True, "ahead_march": False,  "accumulate": 16,
                 "city_roof_density": 0.7},
     "minimal": {"step_factor": 2.0, "light_step_factor": 2.0,
-                "light_cache": True,  "accumulate": 8,
+                "light_cache": True, "ahead_march": False,  "accumulate": 8,
                 "city_roof_density": 0.5},
 }
 

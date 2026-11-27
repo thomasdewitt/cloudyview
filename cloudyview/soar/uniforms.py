@@ -298,6 +298,9 @@ class ViewState:
     # cache instead of marching to the sun (the LIGHT_CACHE switch). The
     # marched sun has a penumbra and the cache's does not.
     light_cache: bool = False
+    # Run the forward pre-march (the AHEAD_MARCH switch). The cheaper tiers
+    # leave it out (tiers.QUALITY_PRESETS).
+    ahead_march: bool = True
     # The scene clock (s): where the city's steam is in its motion.
     # The browser advances it while flying; a still states it (witness
     # --time) and a track carries it per sample.

@@ -303,9 +303,12 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> MarchOut {
     let deep_tint = deep_fill_tint(u.ambient_tint);
 
     // The forward pre-march: one coarse pass over the whole sightline before
-    // anything is composited.
+    // anything is composited. It is a second traversal of the ray, a quarter
+    // to a third of the frame on the cheaper tiers, for a term that moves
+    // their picture by less than its own sampling noise; those tiers compile
+    // it out (AHEAD_MARCH), and tau_total stays 0: nothing ahead.
     var tau_total = 0.0;
-    if (t_near >= 0.0 && t_near < t_far) {
+    if (AHEAD_MARCH && t_near >= 0.0 && t_near < t_far) {
         tau_total = premarch_tau_ahead(
             u.cam_origin, dir, t_near, min(t_far, t_surface), ahead_jitter
         );

@@ -45,11 +45,12 @@ def assemble(surface: str) -> str:
 
 
 def switches(*, periodic: bool, nested: bool, tone_map: bool = True,
-             light_cache: bool = False, motion_guide: bool = False) -> str:
+             light_cache: bool = False, motion_guide: bool = False,
+             ahead_march: bool = True) -> str:
     """The compile-time switch header uniforms.wgsl describes."""
     values = {"PERIODIC_DOMAIN": periodic, "NESTED": nested,
               "TONE_MAP": tone_map, "LIGHT_CACHE": light_cache,
-              "MOTION_GUIDE": motion_guide}
+              "MOTION_GUIDE": motion_guide, "AHEAD_MARCH": ahead_march}
     return "".join(f"const {name}: bool = {'true' if on else 'false'};\n"
                    for name, on in values.items())
 

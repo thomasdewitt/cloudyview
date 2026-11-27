@@ -432,7 +432,7 @@ class SoarRenderer:
         self._lens_groups = None
         self._lens_out = None
 
-    def _spec(self, *, light_cache: bool) -> dict:
+    def _spec(self, *, light_cache: bool, ahead_march: bool = True) -> dict:
         """The module's compile-time switches: this renderer's attributes
         as they stand now plus a lighting method. Every module and pipeline
         cache here keys on the whole of it, so an attribute changed after
@@ -440,7 +440,8 @@ class SoarRenderer:
         value."""
         return dict(periodic=self.periodic, nested=self.nested,
                     tone_map=self.tone_map,
-                    light_cache=bool(light_cache))
+                    light_cache=bool(light_cache),
+                    ahead_march=bool(ahead_march))
 
     def _module_for(self, spec: dict):
         key = tuple(sorted(spec.items()))
@@ -481,7 +482,8 @@ class SoarRenderer:
 
     def _view_spec(self, view: "ViewState") -> dict:
         """The compile-time switches `view` asks for: its lighting method."""
-        return self._spec(light_cache=view.light_cache)
+        return self._spec(light_cache=view.light_cache,
+                          ahead_march=view.ahead_march)
 
     def _bake_pipeline(self):
         """The light cache's bake: one field-x plane of the cache per draw,

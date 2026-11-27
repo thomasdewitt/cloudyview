@@ -77,11 +77,12 @@ const setup = `(async () => {
   for (const surface of Object.keys(shaders)) {
     for (const nested of onOff) for (const periodic of onOff)
     for (const toneMap of onOff) for (const lightCache of onOff)
-    for (const motionGuide of onOff) {
+    for (const motionGuide of onOff) for (const aheadMarch of onOff) {
       // The guide is only ever compiled into a tone-mapped march (the
       // meter's linear one leaves it out).
       if (motionGuide && !toneMap) continue;
-      const spec = { periodic, nested, toneMap, lightCache, motionGuide };
+      const spec = { periodic, nested, toneMap, lightCache, motionGuide,
+                     aheadMarch };
       jobs.push({
         label: surface + " " + Object.entries(spec)
           .filter(([, on]) => on).map(([k]) => k).join("+"),

@@ -121,6 +121,21 @@ def js():
     return json.loads(proc.stdout)
 
 
+def test_the_two_hosts_agree_on_each_tiers_lighting_method(js):
+    """A capture at a tier, from the browser or from `witness --quality`,
+    marches that tier's lighting method: the light cache, and whether the
+    forward pre-march runs. The two tables are in two languages."""
+    from cloudyview.soar.tiers import QUALITY_PRESETS
+    for tier in ALL_TIERS:
+        assert js["presets"][tier]["lightCache"] \
+            is QUALITY_PRESETS[tier]["light_cache"], tier
+        assert js["presets"][tier]["aheadMarch"] \
+            is QUALITY_PRESETS[tier]["ahead_march"], tier
+    # The cheaper tiers are the ones that leave the pre-march out.
+    assert [js["presets"][t]["aheadMarch"] for t in TIERS] \
+        == [False, False, True, True]
+
+
 def test_every_tier_appears_in_every_per_tier_table(js):
     assert sorted(js["tierNames"]) == sorted(ALL_TIERS)
     assert js["cheapestFirst"] == TIERS

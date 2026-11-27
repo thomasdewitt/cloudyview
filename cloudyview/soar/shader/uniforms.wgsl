@@ -14,8 +14,12 @@
 //                                   its picture came from (march.wgsl
 //                                   MarchOut.guide), for a host that
 //                                   reprojects its history
+//     const AHEAD_MARCH: bool       the forward pre-march runs (clouds.wgsl
+//                                   premarch_tau_ahead); without it a sample
+//                                   is lit as if nothing lay ahead of it on
+//                                   the sightline
 //
-// A sixth switch, CITY (the surface under the clouds is the night city, not
+// A seventh switch, CITY (the surface under the clouds is the night city, not
 // the sea), comes with the surface: city/layout.wgsl declares it true and
 // the stand-in city/absent.wgsl declares it false.
 //

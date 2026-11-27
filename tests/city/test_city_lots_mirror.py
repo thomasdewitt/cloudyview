@@ -53,7 +53,8 @@ needs_node = pytest.mark.skipif(shutil.which("node") is None,
 # start to call that is not listed here fails the compile with its name in
 # the error.
 WGSL_FUNCTIONS = ["pcg2d", "city_u01", "city_rand4", "city_tile_cell",
-                  "city_is_avenue", "city_word", "city_cell",
+                  "city_is_avenue", "city_word",
+                  "city_palette_lean_band", "city_cell",
                   "city_escape_building", "city_balcony_building",
                   "city_core_building",
                   "city_shell_style", "city_crown_none",

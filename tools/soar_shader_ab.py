@@ -76,16 +76,17 @@ ALL_VIEWS = {**SOAR_VIEWS, **EXTRA_VIEWS}
 # The flight sampling of each tier (web/soar/constants.js QUALITY_PRESETS):
 # (step_factor, light_step_factor, light cache). Max is High with the live
 # sun march.
+# (view step factor, light step factor, light cache, forward pre-march)
 TIERS = {
-    "max":     (2.0, 2.0, False),
-    "high":    (2.0, 2.0, True),
-    "medium":  (2.5, 4.0, True),
-    "low":     (3.0, 8.0, True),
-    "minimal": (4.0, 12.0, True),
+    "max":     (2.0, 2.0, False, True),
+    "high":    (2.0, 2.0, True, True),
+    "medium":  (2.5, 4.0, True, True),
+    "low":     (3.0, 8.0, True, False),
+    "minimal": (4.0, 12.0, True, False),
     # Not a preset: what a cache tier flies with while its bake for a new sun
     # is in flight (the renderer marches to the sun until the cache is
     # ready). Low's sampling with the live march.
-    "baking":  (3.0, 8.0, False),
+    "baking":  (3.0, 8.0, False, False),
 }
 
 
@@ -201,8 +202,8 @@ def main():
     city = args.scene == "city"
     nested = args.scene == "nested"
     surface = {"day": "ocean", "nested": "ocean", "city": "city"}[args.scene]
-    step_factor, light_factor, light_cache = (
-        TIERS[args.tier] if args.tier else (2.0, 2.0, False))
+    step_factor, light_factor, light_cache, ahead_march = (
+        TIERS[args.tier] if args.tier else (2.0, 2.0, False, True))
     state = SceneState(
         bmin=[float(v) for v in level.bmin], bmax=[float(v) for v in level.bmax],
         dt_view=min(level.dx) * step_factor,
@@ -264,7 +265,8 @@ def main():
             fov=v.get("fov", 70), output_size=(w, h), render_size=(w, h),
             sun_azimuth=v.get("sun_azimuth", 20.0),
             sun_elevation=v.get("sun_elevation", 55.0),
-            jitter=args.jitter, light_cache=light_cache, **extra)
+            jitter=args.jitter, light_cache=light_cache,
+            ahead_march=ahead_march, **extra)
         if args.against is not None:
             a = np.load(args.against / f"{name}.npy")
         else:

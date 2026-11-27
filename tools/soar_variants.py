@@ -395,7 +395,8 @@ def tier_look(presets: dict, tier: str, *, city: bool = False) -> dict:
     tier's LOD strength."""
     p = presets[tier]
     lod = p["cityLodStrength"] if city else p["lodStrength"]
-    return dict(light_cache=bool(p["lightCache"]), haze=float(p["haze"]),
+    return dict(light_cache=bool(p["lightCache"]),
+                ahead_march=bool(p["aheadMarch"]), haze=float(p["haze"]),
                 haze_height_dependent=False,
                 light_march_lod_degrees=APP_LIGHT_MARCH_LOD_DEGREES * lod,
                 view_step_lod_degrees=APP_VIEW_STEP_LOD_DEGREES * lod)
