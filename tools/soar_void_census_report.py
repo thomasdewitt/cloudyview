@@ -17,17 +17,19 @@ ARMS = ("full", "zero", "nomarch", "nomarch_live", "oracle_px", "oracle_t16")
 
 
 def _load(paths):
-    census, timing, placement = [], [], {}
+    census, timing, placement, bench = [], [], {}, []
     for p in paths:
         for line in open(p):
             r = json.loads(line)
-            if r["kind"] == "census":
+            if r["kind"] == "census_bench_look":
+                bench.append(r)
+            elif r["kind"] == "census":
                 census.append(r)
             elif r["kind"] == "timing":
                 timing.append(r)
             elif r["kind"] == "placement":
                 placement[r["demo"]] = r
-    return census, timing, placement
+    return census, timing, placement, bench
 
 
 def _mean(xs):
@@ -75,9 +77,9 @@ def run_to_run(c):
 
 
 def report_main(args):
-    census, timing, placement = _load(args.jsonl)
+    census, timing, placement, bench = _load(args.jsonl)
     lines = []
-    out = {"census": census, "timing": timing,
+    out = {"census": census, "timing": timing, "census_bench_look": bench,
            "placement": list(placement.values())}
 
     # ---- setup ----
@@ -177,6 +179,36 @@ def report_main(args):
                 f"| {_f(g(rs, 'stock', 'cloud_dtau_lt_1e4'))} | "
                 f"{_f(g(rs, 'stock', 'cloud_dtau_lt_1e3'))} | "
                 f"{_f(g(rs, 'stock', 'cloud_dtau_ge_1e3'))} |")
+        lines.append("")
+
+    # ---- as flown vs soar_bench's look ----
+    if bench and census:
+        flown = {(r["demo"], r["tier"], r["view"]): r for r in census}
+        lines += ["## As flown vs soar_bench's look", "",
+                  "The same views and sampling, with haze and the two LOD "
+                  "angles as the tier sets them (flown) and as soar_bench "
+                  "leaves them, at ViewState's defaults (bench: haze "
+                  f"{bench[0]['look']['haze']:.3g}, view LOD "
+                  f"{bench[0]['look']['view_step_lod_degrees']:.3g} deg). "
+                  "Steps per pixel, view march + pre-march, mean over the "
+                  "demos and views both were counted on.", "",
+                  "| tier | flown march | bench march | flown pm | bench pm "
+                  "| bench / flown (all steps) | ends at t_far, flown | bench |",
+                  "|---|---|---|---|---|---|---|---|"]
+        for t in sorted({r["tier"] for r in bench}, key=_tier_key):
+            pairs = [(flown[(r["demo"], r["tier"], r["view"])]["stock"], r["stock"])
+                     for r in bench if r["tier"] == t
+                     and (r["demo"], r["tier"], r["view"]) in flown]
+            if not pairs:
+                continue
+            fm = _mean([a["total"] for a, _ in pairs])
+            bm = _mean([b["total"] for _, b in pairs])
+            fp = _mean([a["premarch"] for a, _ in pairs])
+            bp = _mean([b["premarch"] for _, b in pairs])
+            lines.append(f"| {t} | {_f(fm)} | {_f(bm)} | {_f(fp)} | {_f(bp)} | "
+                         f"{(bm + bp) / (fm + fp):.2f} | "
+                         f"{_f(_mean([a['frac_end_tfar'] for a, _ in pairs]), 2)} | "
+                         f"{_f(_mean([b['frac_end_tfar'] for _, b in pairs]), 2)} |")
         lines.append("")
 
     # ---- timing ----

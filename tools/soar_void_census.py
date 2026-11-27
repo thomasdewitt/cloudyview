@@ -463,6 +463,17 @@ def census_main(args):
                                   dx=[float(d) for d in level.dx])) + "\n")
         for tier in sorted(args.tiers.split(","), key=sv.TIER_ORDER.index):
             look = sv.tier_look(presets, tier)
+            if args.bench_look:
+                # soar_bench's ViewState: the tier's sampling and light
+                # cache, every look default (haze, both LOD angles) left
+                # as ViewState has them.
+                d = sv.ViewState(camera_position=[0, 0, 0], azimuth=0,
+                                 elevation=0, fov=1, output_size=(1, 1),
+                                 render_size=(1, 1))
+                look = dict(light_cache=look["light_cache"], haze=d.haze,
+                            haze_height_dependent=d.haze_height_dependent,
+                            light_march_lod_degrees=d.light_march_lod_degrees,
+                            view_step_lod_degrees=d.view_step_lod_degrees)
             state = sv.tier_scene(r, level, presets, tier, periodic)
             size = sv.render_size(presets, tier, out_w, out_h)
             for name in views:
@@ -470,6 +481,14 @@ def census_main(args):
                     continue
                 view = sv.make_view(views[name], look, (out_w, out_h), size)
                 r.use_zero_field(False)
+                if args.bench_look:
+                    p = [run_census_pass(r, state, view, f"census{k}") for k in range(2)]
+                    out.write(json.dumps(dict(
+                        kind="census_bench_look", demo=demo, tier=tier, view=name,
+                        size=list(size), look=look, dt_view=state.dt_view,
+                        stock=stats_from(*p))) + "\n")
+                    out.flush()
+                    continue
                 p = [run_census_pass(r, state, view, f"census{k}") for k in range(4)]
                 rec = dict(kind="census", demo=demo, tier=tier, view=name,
                            size=list(size), look=look,
@@ -582,6 +601,10 @@ def main():
                        help="the window; each tier renders at its scale of it")
         p.add_argument("--out", required=True, help="JSON lines, appended")
         if cmd == "census":
+            p.add_argument("--bench-look", action="store_true",
+                           help="count the stock march only, under "
+                                "soar_bench's look (ViewState's defaults "
+                                "for haze and the LOD angles)")
             p.add_argument("--oracle-frames", type=int, default=8,
                            help="frames whose cloud distances the oracle "
                                 "covers (timing's --frames)")
