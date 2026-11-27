@@ -292,7 +292,15 @@ def census_patch(src: str, out_pass: int) -> str:
     return sv.patch(src, """\
     // Alpha is 1, except under the live steam, where it carries t_front.
 """, f"""\
-    return {outs[out_pass]};
+    // fs_main returns a MarchOut (march.wgsl), whose colour carries the
+    // counts. In a block of its own: naga's Metal backend names every
+    // struct returned in one scope `_tmp`, and the march's own return
+    // follows in this one (found on the M1, 2026-11-27). The test is always
+    // true.
+    if (cn_end >= 0.0) {{
+        out.color = {outs[out_pass]};
+        return out;
+    }}
     // Alpha is 1, except under the live steam, where it carries t_front.
 """, what="census out")
 
