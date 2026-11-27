@@ -568,11 +568,12 @@ def time_variants(renderer: VariantRenderer, state, view, arms, *,
 
     wall_ms is soar_bench's number: render(frames) / frames, which includes
     one read-back of the accumulator. gpu_ms is the march pass alone, from
-    timestamps, or None without the timestamp-query feature."""
+    timestamps, or None without the timestamp-query feature; gpu_all_ms is
+    every timestamped (banded) pass, the surface stages with the march."""
     for arm in arms:
         _select(renderer, arm)
         renderer.render(state, view, frames=2)
-    out = {a.label: {"wall_ms": [], "gpu_ms": []} for a in arms}
+    out = {a.label: {"wall_ms": [], "gpu_ms": [], "gpu_all_ms": []} for a in arms}
     for rep in range(repeats):
         order = arms[rep % len(arms):] + arms[:rep % len(arms)]
         for arm in order:
@@ -586,6 +587,8 @@ def time_variants(renderer: VariantRenderer, state, view, arms, *,
             out[arm.label]["gpu_ms"].append(
                 None if gpu is None
                 else gpu.get(renderer.march_slot, 0.0) / frames)
+            out[arm.label]["gpu_all_ms"].append(
+                None if gpu is None else sum(gpu.values()) / frames)
     _select(renderer, arms[0])
     renderer.use_zero_field(False)
     return out
