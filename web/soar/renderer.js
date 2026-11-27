@@ -769,15 +769,21 @@ export class Renderer {
         // What this rung is expected to cost relative to the one below it.
         // Pixels go as the square of the scale. The view march takes a step
         // every stepFactor voxels, so halving the step factor doubles the
-        // steps. The light march does the same, and is about a third of the
-        // frame — hence the weighted third/two-thirds split rather than
-        // treating the two step factors alike. Crude, and deliberately so: it
-        // is a gate, not a model, and it only has to be right to within the
-        // factor of safety in HOLD_MAX_FRAME_MS.
+        // steps. Where the tier marches to the sun (Max), the light march
+        // does the same and is about a third of the frame, hence the
+        // third/two-thirds split. Where the sun is read from the cache
+        // (every other tier) the light step is not in a cloud sample's cost
+        // at all, and charging for it priced Low's climb at 6.5 times its
+        // flight frame and Minimal's at 13, which a slow machine then could
+        // not afford. Crude, and deliberately so: it is a gate, not a
+        // model, and it only has to be right to within the factor of safety
+        // in HOLD_MAX_FRAME_MS.
         costRatio: (step.scale / below.scale) ** 2
-                 * ((2 / 3) * (below.stepFactor / sampling.stepFactor)
-                    + (1 / 3) * (below.lightStepFactor
-                                 / sampling.lightStepFactor)),
+                 * (preset.lightCache
+                    ? below.stepFactor / sampling.stepFactor
+                    : (2 / 3) * (below.stepFactor / sampling.stepFactor)
+                      + (1 / 3) * (below.lightStepFactor
+                                   / sampling.lightStepFactor)),
       });
     }
     this._holdLadder = rungs;

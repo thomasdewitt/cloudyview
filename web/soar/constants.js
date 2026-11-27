@@ -432,8 +432,12 @@ export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
 export const REPROJECT_DEFAULT = false;
 // The longest a history pixel is believed, in seconds, whatever is in it.
 // Most pixels of a moving view are held to less by their own depth spread
-// (REPROJECT_DRIFT_BUDGET_PX).
+// (REPROJECT_DRIFT_BUDGET_PX). The motion-smoothing slider sets it: its
+// [0, 1] is [0, REPROJECT_LIFETIME_MAX_S] seconds, so a tier's default
+// smoothing is also its default lifetime. REPROJECT_LIFETIME_S is what a
+// renderer holds until a tier's default is applied.
 export const REPROJECT_LIFETIME_S = 0.5;
+export const REPROJECT_LIFETIME_MAX_S = 1.0;
 // How far, in history pixels, one motion per pixel may misplace the
 // contributions it does not fit before the history is let go.
 export const REPROJECT_DRIFT_BUDGET_PX = 1.0;
