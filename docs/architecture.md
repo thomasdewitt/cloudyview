@@ -148,7 +148,7 @@ and `witness --quality` renders the same thing from Python.
 | High | 1.0 | 1.0 | 2 | 2 | cache | 70 km |
 | Medium | 0.7 | 1.0 | 2.5 | 4 | cache | 25 km |
 | Low | 0.3 | 0.6 | 3 | 8 | cache | 15 km |
-| Minimal | 0.125 | 0.25 | 4 | 12 | cache | 8 km |
+| Minimal | 0.125 | 0.375 | 4 | 12 | cache | 8 km |
 
 The history scale is the reprojected history's size as a fraction of the
 output's. Max, which takes eight samples a frame, is blended in place: with

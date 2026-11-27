@@ -435,6 +435,12 @@ export const DEFAULT_MOTION_RESET_TRANSLATION_FRACTION = 0.05;
 // so much more than the resolve pass that the pass's size is not what a tier
 // saves on. Minimal's is half: there the pass is a visible share of a frame
 // that has little to spare.
+//
+// Minimal's day history is three times its march, where Low's is twice. At
+// twice (0.25) a moving view is softer than the view it settles into when
+// the camera stops, which is averaged at a quarter scale; at three times
+// the two are as sharp as each other, for a resolve pass that is 0.5 ms of
+// a 10 ms frame on an M1 (thomas-context, cloudyview-perf-pass-2026-11-27).
 export const REPROJECT_DEFAULT = true;
 // The longest a history pixel is believed, in seconds, whatever is in it.
 // Most pixels of a moving view are held to less by their own depth spread
@@ -647,7 +653,7 @@ export const QUALITY_PRESETS = {
   // in the startup toast, on exactly the machines a jokier name would insult.
   minimal: {
     name: "minimal", label: "Minimal",
-    renderScale: 0.125, cityRenderScale: 0.125, historyScale: 0.25, cityHistoryScale: 0.5, stepFactor: 4.0, lightStepFactor: 12.0,
+    renderScale: 0.125, cityRenderScale: 0.125, historyScale: 0.375, cityHistoryScale: 0.5, stepFactor: 4.0, lightStepFactor: 12.0,
     sppPerFrame: 1, lightCache: true, aheadMarch: false, fineGradient: false,
     holdRungs: [{ scale: 0.25, sampling: "minimal" }],
     holdRenderScale: 0.25, parkedFrames: 8,
@@ -708,7 +714,8 @@ export function evenLadder() {
 let evenLadderApplied = false;
 /**
  * Put the even ladder in force for this page: each tier's flight render
- * scale, a history of twice that (never more than the output), a hold scale
+ * scale, a history of twice that (never more than the output; Minimal, whose
+ * scale the ladder does not move, keeps its own), a hold scale
  * no lower than the flight scale, Max at one sample a frame, and the
  * auto-tier gate's ratio the ladder's own at every step. Once; before a
  * viewer is made. Returns the ladder.
@@ -720,7 +727,9 @@ export function applyEvenLadder() {
   for (const [tier, scale] of Object.entries(ladder.scales)) {
     const preset = QUALITY_PRESETS[tier];
     preset.renderScale = scale;
-    preset.historyScale = Math.min(1.0, Math.round(2000 * scale) / 1000);
+    if (tier !== "minimal") {
+      preset.historyScale = Math.min(1.0, Math.round(2000 * scale) / 1000);
+    }
     preset.holdRenderScale = Math.max(preset.holdRenderScale, scale);
   }
   QUALITY_PRESETS.max.sppPerFrame = 1;
