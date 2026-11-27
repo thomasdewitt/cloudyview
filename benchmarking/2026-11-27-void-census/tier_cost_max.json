@@ -1,0 +1,749 @@
+{
+ "summary": [
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "over": "demos",
+   "n": 9,
+   "mean": 9.39148266141824,
+   "median": 3.4853616860202115,
+   "max": 42.107677380288955,
+   "min": 1.5259977831661213,
+   "max_at": [
+    "stratified"
+   ]
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "over": "views",
+   "n": 90,
+   "mean": 10.01145153749771,
+   "median": 3.241862933579802,
+   "max": 83.68071706516115,
+   "min": 1.3420244166147848,
+   "max_at": [
+    "marine-congestus-coarse",
+    "bench_thick_lit"
+   ]
+  }
+ ],
+ "per_view": [
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "twpice",
+   "view": "bench_thick_backlit",
+   "ratio": 4.885573456051269
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "twpice",
+   "view": "bench_under_base",
+   "ratio": 4.5731903327235175
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "twpice",
+   "view": "bench_overview",
+   "ratio": 2.223814116857604
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "twpice",
+   "view": "bench_thick_lit",
+   "ratio": 2.437222765405918
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "twpice",
+   "view": "bench_ocean_down",
+   "ratio": 2.3227865361875715
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "twpice",
+   "view": "fly_cruise",
+   "ratio": 4.603548403969028
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "twpice",
+   "view": "fly_cruise_back",
+   "ratio": 4.685839453634818
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "twpice",
+   "view": "fly_under_up",
+   "ratio": 3.251834069873623
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "twpice",
+   "view": "fly_above_down",
+   "ratio": 2.9484112775736255
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "twpice",
+   "view": "fly_demo_still",
+   "ratio": 3.0375598804935575
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "congestus",
+   "view": "bench_thick_backlit",
+   "ratio": 2.0713114010331997
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "congestus",
+   "view": "bench_under_base",
+   "ratio": 4.248319216839943
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "congestus",
+   "view": "bench_overview",
+   "ratio": 1.8333281807837216
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "congestus",
+   "view": "bench_thick_lit",
+   "ratio": 6.699624607467221
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "congestus",
+   "view": "bench_ocean_down",
+   "ratio": 3.2318917972859813
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "congestus",
+   "view": "fly_cruise",
+   "ratio": 2.647065281335551
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "congestus",
+   "view": "fly_cruise_back",
+   "ratio": 3.312773883947372
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "congestus",
+   "view": "fly_under_up",
+   "ratio": 2.984935823417544
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "congestus",
+   "view": "fly_above_down",
+   "ratio": 1.9401545696162499
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "congestus",
+   "view": "fly_demo_still",
+   "ratio": 2.614547378307809
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "dycoms",
+   "view": "bench_thick_backlit",
+   "ratio": 4.603850988536528
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "dycoms",
+   "view": "bench_under_base",
+   "ratio": 2.467624538770453
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "dycoms",
+   "view": "bench_overview",
+   "ratio": 5.423322921873963
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "dycoms",
+   "view": "bench_thick_lit",
+   "ratio": 8.447053775986724
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "dycoms",
+   "view": "bench_ocean_down",
+   "ratio": 2.1981519288519986
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "dycoms",
+   "view": "fly_cruise",
+   "ratio": 7.174420972536542
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "dycoms",
+   "view": "fly_cruise_back",
+   "ratio": 7.926169674540621
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "dycoms",
+   "view": "fly_under_up",
+   "ratio": 3.399095919565755
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "dycoms",
+   "view": "fly_above_down",
+   "ratio": 1.6402236025525854
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "dycoms",
+   "view": "fly_demo_still",
+   "ratio": 2.4608672553908195
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce",
+   "view": "bench_thick_backlit",
+   "ratio": 4.029328740883399
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce",
+   "view": "bench_under_base",
+   "ratio": 4.167723001526141
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce",
+   "view": "bench_overview",
+   "ratio": 3.6255434554767243
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce",
+   "view": "bench_thick_lit",
+   "ratio": 4.248328822817804
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce",
+   "view": "bench_ocean_down",
+   "ratio": 4.763598461529084
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce",
+   "view": "fly_cruise",
+   "ratio": 4.255083800776153
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce",
+   "view": "fly_cruise_back",
+   "ratio": 4.13570348429782
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce",
+   "view": "fly_under_up",
+   "ratio": 4.382795983013645
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce",
+   "view": "fly_above_down",
+   "ratio": 3.4397110667356943
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce",
+   "view": "fly_demo_still",
+   "ratio": 4.156743863122367
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "stratified",
+   "view": "bench_thick_backlit",
+   "ratio": 34.41221685087925
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "stratified",
+   "view": "bench_under_base",
+   "ratio": 33.92869607280105
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "stratified",
+   "view": "bench_overview",
+   "ratio": 50.72929900442172
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "stratified",
+   "view": "bench_thick_lit",
+   "ratio": 48.19071396003395
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "stratified",
+   "view": "bench_ocean_down",
+   "ratio": 36.413596559232566
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "stratified",
+   "view": "fly_cruise",
+   "ratio": 47.57506644546956
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "stratified",
+   "view": "fly_cruise_back",
+   "ratio": 51.85794279210287
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "stratified",
+   "view": "fly_under_up",
+   "ratio": 42.923965319590664
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "stratified",
+   "view": "fly_above_down",
+   "ratio": 49.63819570527735
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "stratified",
+   "view": "fly_demo_still",
+   "ratio": 23.56826438127707
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-dales",
+   "view": "bench_thick_backlit",
+   "ratio": 1.6015724480285323
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-dales",
+   "view": "bench_under_base",
+   "ratio": 1.5253188114301282
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-dales",
+   "view": "bench_overview",
+   "ratio": 1.4927570551898186
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-dales",
+   "view": "bench_thick_lit",
+   "ratio": 1.8174848359442075
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-dales",
+   "view": "bench_ocean_down",
+   "ratio": 1.8734300382541442
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-dales",
+   "view": "fly_cruise",
+   "ratio": 1.403487973285486
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-dales",
+   "view": "fly_cruise_back",
+   "ratio": 1.3894246789226656
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-dales",
+   "view": "fly_under_up",
+   "ratio": 1.3420244166147848
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-dales",
+   "view": "fly_above_down",
+   "ratio": 1.4534565567029072
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-dales",
+   "view": "fly_demo_still",
+   "ratio": 1.4682161926776223
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-sam",
+   "view": "bench_thick_backlit",
+   "ratio": 1.8468989867049077
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-sam",
+   "view": "bench_under_base",
+   "ratio": 2.1237055144472623
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-sam",
+   "view": "bench_overview",
+   "ratio": 2.0078133591572076
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-sam",
+   "view": "bench_thick_lit",
+   "ratio": 2.061228825984419
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-sam",
+   "view": "bench_ocean_down",
+   "ratio": 2.7555850585337707
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-sam",
+   "view": "fly_cruise",
+   "ratio": 2.178972029868486
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-sam",
+   "view": "fly_cruise_back",
+   "ratio": 2.212426566667456
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-sam",
+   "view": "fly_under_up",
+   "ratio": 2.0896737476271143
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-sam",
+   "view": "fly_above_down",
+   "ratio": 2.088633154499788
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-sam",
+   "view": "fly_demo_still",
+   "ratio": 2.121174192495954
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "marine-congestus-coarse",
+   "view": "bench_thick_backlit",
+   "ratio": 16.33374663205967
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "marine-congestus-coarse",
+   "view": "bench_under_base",
+   "ratio": 19.460944924320053
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "marine-congestus-coarse",
+   "view": "bench_overview",
+   "ratio": 8.41874848794933
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "marine-congestus-coarse",
+   "view": "bench_thick_lit",
+   "ratio": 83.68071706516115
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "marine-congestus-coarse",
+   "view": "bench_ocean_down",
+   "ratio": 27.19316433780015
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "marine-congestus-coarse",
+   "view": "fly_cruise",
+   "ratio": 20.092839424641205
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "marine-congestus-coarse",
+   "view": "fly_cruise_back",
+   "ratio": 37.79476969091714
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "marine-congestus-coarse",
+   "view": "fly_under_up",
+   "ratio": 17.801504695726504
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "marine-congestus-coarse",
+   "view": "fly_above_down",
+   "ratio": 17.431131137539836
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "marine-congestus-coarse",
+   "view": "fly_demo_still",
+   "ratio": 17.887427729166316
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "utah-convection-coarse",
+   "view": "bench_thick_backlit",
+   "ratio": 2.2137164255770405
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "utah-convection-coarse",
+   "view": "bench_under_base",
+   "ratio": 2.702806938248057
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "utah-convection-coarse",
+   "view": "bench_overview",
+   "ratio": 2.0052934961763085
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "utah-convection-coarse",
+   "view": "bench_thick_lit",
+   "ratio": 2.429532825911647
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "utah-convection-coarse",
+   "view": "bench_ocean_down",
+   "ratio": 2.8781223673540084
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "utah-convection-coarse",
+   "view": "fly_cruise",
+   "ratio": 3.112373777381768
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "utah-convection-coarse",
+   "view": "fly_cruise_back",
+   "ratio": 3.3510763360715456
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "utah-convection-coarse",
+   "view": "fly_under_up",
+   "ratio": 2.4034787528430317
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "utah-convection-coarse",
+   "view": "fly_above_down",
+   "ratio": 2.048547243845718
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "utah-convection-coarse",
+   "view": "fly_demo_still",
+   "ratio": 2.200379860390794
+  }
+ ],
+ "per_demo": [
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "twpice",
+   "ratio": 3.4853616860202115
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "congestus",
+   "ratio": 2.78779055379096
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "dycoms",
+   "ratio": 4.5706144123133035
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce",
+   "ratio": 4.07678394024349
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "stratified",
+   "ratio": 42.107677380288955
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-dales",
+   "ratio": 1.5259977831661213
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "rce-sam",
+   "ratio": 2.1148818251119796
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "marine-congestus-coarse",
+   "ratio": 21.382250760071628
+  },
+  {
+   "step": "max/high",
+   "measure": "as flown",
+   "demo": "utah-convection-coarse",
+   "ratio": 2.4719856117574968
+  }
+ ],
+ "per_tier": [
+  {
+   "tier": "high",
+   "size": [
+    2560,
+    1440
+   ],
+   "flown_ms": 6.262666533333333,
+   "throughput_ms": null,
+   "px_cost_ratio": null,
+   "extrapolated_ms": null,
+   "not_entered_ms": 0.1748487111111111,
+   "wall_ms": 14.891402659850428,
+   "wall_minus_gpu_all_ms": 8.628736126517094
+  },
+  {
+   "tier": "max",
+   "size": [
+    2560,
+    1440
+   ],
+   "flown_ms": 73.5592751111111,
+   "throughput_ms": null,
+   "px_cost_ratio": null,
+   "extrapolated_ms": null,
+   "not_entered_ms": 3.0460820444444443,
+   "wall_ms": 82.59384388901607,
+   "wall_minus_gpu_all_ms": 9.034568777904965
+  }
+ ]
+}
