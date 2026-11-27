@@ -35,6 +35,14 @@ with render size; what can change is how coherent neighbouring pixels'
 fetches are, which is worse at a small render. The second size measures
 how far the per-pixel cost moves with resolution while the GPU is full.
 
+The report's third measure, "extrapolated", is an estimate, not a
+measurement: the throughput time times that per-pixel penalty raised to
+the number of halvings from the first saturate size down to the tier's
+own render width, i.e. the penalty per halving between the two saturate
+sizes assumed to hold all the way down. It assumes the second size still
+fills the GPU; where it does not, part of the penalty is fill, and the
+estimate over-corrects (makes the small tiers dearer than they are).
+
 The report gives, for each step up (low/minimal, medium/low, high/medium),
 the ratio per view and per demo (summed over the demo's views), and their
 mean, median and maximum. The gate in escalateQualityTier has to hold on
@@ -205,19 +213,33 @@ def report(paths, md_path=None):
     flown = {k: _fastest(rs) for k, rs in flown_recs.items()}
     live = {k: _fastest(rs, "nomarch_live") for k, rs in flown_recs.items()}
     sat = scaled[0] if scaled else {}
+    extra = {}
+    if len(scaled) > 1:
+        import math
+        z0, z1 = sat_sizes[0], sat_sizes[1]
+        per_halving = math.log2(z0[0] / z1[0])
+        for k, v in sat.items():
+            if k in scaled[1] and k in flown_recs:
+                w = flown_recs[k][0]["size"][0]
+                halvings = math.log2(z0[0] / w)
+                extra[k] = v * (scaled[1][k] / v) ** (halvings / per_halving)
     demos = list(dict.fromkeys(k[0] for k in flown))
     views = list(dict.fromkeys(k[2] for k in flown))
     tiers = [t for t in sv.TIER_ORDER if any(k[1] == t for k in flown)]
     steps = [f"{hi}/{lo}" for lo, hi in STEPS if lo in tiers and hi in tiers]
-    measures = [("as flown", flown)] + ([("throughput", sat)] if sat else [])
+    measures = ([("as flown", flown)] + ([("throughput", sat)] if sat else [])
+                + ([("extrapolated", extra)] if extra else []))
     ratios = {name: _ratios(ms, demos, views) for name, ms in measures}
 
     lines = ["March-pass GPU time, ms per frame, fastest of the repeats (and of "
              "the runs). *as flown*: each tier at its render scale of the "
              "window. *throughput*: each tier's look timed at "
              + (f"{sat_sizes[0][0]}x{sat_sizes[0][1]}" if sat_sizes else "-")
-             + " and scaled by the tier's pixel count. Ratios are the next "
-             "tier's time over this tier's.", ""]
+             + " and scaled by the tier's pixel count. *extrapolated*: the "
+             "throughput time with the per-pixel penalty measured between the "
+             "two saturate sizes carried down to the tier's own size (an "
+             "estimate; see the docstring). Ratios are the next tier's time "
+             "over this tier's.", ""]
     for name, ns in (("as flown", noisy), ("throughput", noisy_sat)):
         if ns:
             lines += [f"{name}: {len(ns)} cells spread by more than "
@@ -251,17 +273,21 @@ def report(paths, md_path=None):
               "Means over every (demo, view). *not entered*: the same kernel "
               "with the march not entered, the per-pixel work outside the march "
               "loop. *above throughput*: 1 - throughput / as flown, the part of "
-              "the as-flown time the GPU spends not full. *wall - all passes*: "
-              "this Python host's encoding, submit, poll and read-back per "
-              "frame, not the browser's."
+              "the as-flown time the GPU spends not full. *above extrapolated*: "
+              "the same against the extrapolated time, the part that is "
+              "neither throughput nor fetch coherence. *wall - all passes*: "
+              "this Python host's per-frame time outside the timed passes: its "
+              "encoding, its wait on each band before the next is submitted, "
+              "the untimed accumulate pass at render size and the read-back. "
+              "Not the browser's."
               + ("" if len(sat_sizes) < 2 else
                  f" *px cost {sat_sizes[1][0]}x{sat_sizes[1][1]} / "
                  f"{sat_sizes[0][0]}x{sat_sizes[0][1]}*: the tier's per-pixel "
                  "cost at the smaller saturate size over the larger.") , "",
               "| tier | render size | as flown ms | throughput ms | above throughput | "
-              "px cost ratio | not entered ms | not entered share | wall ms | "
-              "wall - all passes ms |",
-              "|---|---|---|---|---|---|---|---|---|---|"]
+              "px cost ratio | extrapolated ms | above extrapolated | "
+              "not entered ms | not entered share | wall ms | wall - all passes ms |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for t in tiers:
         ks = [k for k in flown if k[1] == t]
         f = statistics.mean(flown[k] for k in ks)
@@ -277,11 +303,16 @@ def report(paths, md_path=None):
         pxr = (statistics.mean(scaled[1][k] / scaled[0][k] for k in k2)
                if k2 else None)
         pxr_s = f"{pxr:.3f}" if pxr is not None else "-"
+        kx = [k for k in ks if k in extra]
+        ex = statistics.mean(extra[k] for k in kx) if kx else None
+        ex_s = f"{ex:.3f}" if ex is not None else "-"
+        ab_x = f"{100 * (1 - ex / f):.0f}%" if ex is not None else "-"
         lines.append(f"| {t} | {size[0]}x{size[1]} | {f:.3f} | {st_s} | {above} | "
-                     f"{pxr_s} | {lv:.3f} | {100 * lv / f:.0f}% | {w:.2f} | "
-                     f"{w - al:.2f} |")
+                     f"{pxr_s} | {ex_s} | {ab_x} | {lv:.3f} | {100 * lv / f:.0f}% | "
+                     f"{w:.2f} | {w - al:.2f} |")
         out_json["per_tier"].append(dict(tier=t, size=size, flown_ms=f,
                                          throughput_ms=st, px_cost_ratio=pxr,
+                                         extrapolated_ms=ex,
                                          not_entered_ms=lv, wall_ms=w,
                                          wall_minus_gpu_all_ms=w - al))
     lines.append("")
@@ -304,7 +335,8 @@ def report(paths, md_path=None):
     lines += ["## Per view", "",
               "| demo | view | " + " | ".join(tiers) + " | "
               + " | ".join(f"{st} flown" for st in steps)
-              + ("" if not sat else " | " + " | ".join(f"{st} thru" for st in steps))
+              + "".join(" | " + " | ".join(f"{st} {tag}" for st in steps)
+                        for tag, ms in (("thru", sat), ("extrap", extra)) if ms)
               + " |",
               "|" + "---|" * (2 + len(tiers) + len(steps) * len(measures))]
     for d in demos:
