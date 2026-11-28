@@ -162,11 +162,12 @@ def candidate(src: str, name: str) -> str:
     if name == "pm_vertical":
         return p(src, """\
     var tau_total = 0.0;
-    if (t_near >= 0.0 && t_near < t_far) {
+    if (AHEAD_MARCH && t_near >= 0.0 && t_near < t_far) {
         tau_total = premarch_tau_ahead(""", f"""\
     var tau_total = 0.0;
     // menu: no pre-march for a sightline near the vertical.
-    if (t_near >= 0.0 && t_near < t_far && ahead_novelty >= {PM_NOVELTY_MIN}) {{
+    if (AHEAD_MARCH && t_near >= 0.0 && t_near < t_far
+        && ahead_novelty >= {PM_NOVELTY_MIN}) {{
         tau_total = premarch_tau_ahead(""", what=name)
     if name == "uplight_4":
         return p(src, "const CITY_UP_PROBE_STEPS: i32 = 12;",

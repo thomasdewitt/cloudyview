@@ -14,6 +14,8 @@ refuses an anchor that has moved); the tree's shader is not touched. None of
 them is meant to look right. They are ceilings and controls:
 
   no_premarch    premarch_tau_ahead never called; tau_total stays 0
+  premarch_on    the pre-march at every tier: what it costs where the tier
+                 compiles it out (Minimal, Low), where no_premarch is a no-op
   no_gradient    sigma_gradient never called at cloud samples; grad = 0
   ocean_const    ocean_shade replaced by a constant colour; where the sea is,
                  and what is composited over it, unchanged
@@ -84,7 +86,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import soar_variants as sv                                    # noqa: E402
 
-DAY_VARIANTS = ("no_premarch", "no_gradient", "ocean_const", "ice_const",
+DAY_VARIANTS = ("no_premarch", "premarch_on", "no_gradient", "ocean_const", "ice_const",
                 "clearance_ctl")
 CITY_VARIANTS = ("uplight_const",)
 CONTROL = "stock_again"
@@ -94,9 +96,15 @@ def ablate(src: str, name: str) -> str:
     p = sv.patch
     if name == CONTROL:
         return src + "\n// A/A control: the stock module, compiled again.\n"
+    if name == "premarch_on":
+        # Minimal and Low compile the pre-march out (AHEAD_MARCH), so there
+        # no_premarch is a second A/A control; this arm puts it back.
+        return p(src, "    if (AHEAD_MARCH && t_near >= 0.0 && t_near < t_far) {\n",
+                 "    if (t_near >= 0.0 && t_near < t_far) {  // ablation: "
+                 "pre-march at every tier\n", what=name)
     if name == "no_premarch":
         return p(src, """\
-    if (t_near >= 0.0 && t_near < t_far) {
+    if (AHEAD_MARCH && t_near >= 0.0 && t_near < t_far) {
         tau_total = premarch_tau_ahead(
             u.cam_origin, dir, t_near, min(t_far, t_surface), ahead_jitter
         );
@@ -196,7 +204,7 @@ def main():
         ap.error("--demo is required (unless --report)")
     city = args.scene == "city"
     surface = "city" if city else "ocean"
-    allowed = CITY_VARIANTS + ("no_premarch", "no_gradient", "ice_const",
+    allowed = CITY_VARIANTS + ("no_premarch", "premarch_on", "no_gradient", "ice_const",
                                "clearance_ctl") if city else DAY_VARIANTS
     names = [v for v in (args.variants.split(",") if args.variants
                          else (CITY_VARIANTS if city else DAY_VARIANTS)) if v]
